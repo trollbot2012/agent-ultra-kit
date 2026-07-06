@@ -122,6 +122,30 @@ agent-ultra panel "Is this change production-safe?" --evidence-dir ./src
 Adapters (all optional): generic CLI, LiteLLM, Docker sandbox, memory
 (Mneme-style), Hermes-style and Ktisis-style runtimes.
 
+### Workers: router (default) vs Deep Agents (optional)
+
+Ultra is the **supervisor and proof gate** — it decides what ships. A *worker*
+only fills the builder/fixer slots:
+
+- **Router worker (default)** — stdlib, one model call per fix, returns an
+  advisory single-file edit that the loop applies with automatic rollback.
+  Cheap, portable, Windows-native, zero dependencies.
+- **Deep Agents worker (optional)** — a multi-step LangChain Deep Agents
+  runtime for from-scratch multi-file builds and large repairs. Installed only
+  via the extra; imported only when selected.
+
+```bash
+pip install agent-ultra-kit                 # router worker, zero deps
+pip install "agent-ultra-kit[deepagents]"   # + optional Deep Agents worker
+
+agent-ultra ultra "fix the finding" --workspace .                    # router (default)
+agent-ultra ultra "build a service" --workspace . --build --worker deepagents
+```
+
+Both workers return the same `WorkerResult` shape, so Ultra never cares which
+one produced a change — the edit still passes tests, the panel, and the proof
+gate before it can ship. **Deep Agents is a worker, not the ship authority.**
+
 ## Use it with YOUR agent
 
 Your agent needs exactly one thing — a way to call a model:

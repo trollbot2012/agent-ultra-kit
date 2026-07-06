@@ -294,6 +294,23 @@ def run_doctor(args) -> int:
     except Exception as e:
         add(FAIL, "secret hygiene", str(e)[:120])
 
+    # 9. hybrid worker layer: router is always available; deepagents is an
+    # OPTIONAL extra — its absence is a PASS (never required).
+    try:
+        from ..workers import RouterWorker  # noqa: F401
+        from ..workers.deepagents_worker import deepagents_available
+        if getattr(args, "deepagents", False):
+            avail = deepagents_available()
+            add(PASS if avail else WARN,
+                f"deepagents worker: {'installed' if avail else 'NOT installed'}",
+                "optional extra: pip install agent-ultra-kit[deepagents]"
+                if not avail else "optional heavy builder/fixer ready")
+        else:
+            add(PASS, "worker layer: router (default) available",
+                "deepagents is optional — run `doctor --deepagents` to check it")
+    except Exception as e:
+        add(FAIL, "worker layer", str(e)[:120])
+
     _print(results)
     return 1 if any(s == FAIL for s, _, _ in results) else 0
 

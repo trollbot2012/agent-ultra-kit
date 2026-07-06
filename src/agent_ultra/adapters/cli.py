@@ -92,18 +92,68 @@ def _finding_dict(f) -> dict:
 
 
 def _ultra(args) -> int:
-    from ..ultra_loop.loop import UltraLoop
+    from ..ultra_loop.loop import UltraLoop, default_test_runner
+    from ..workers.select import resolve_worker_choice, select_worker
+    from ..workers.adapt import worker_as_fixer, worker_as_builder
     pool = _build_pool(args)
     engine = PanelEngine(pool, config={"routing_mode": args.mode})
     broker = CommandBroker(ledger_path=Path(args.workspace) / ".ultra" / "broker.jsonl",
                            auto_run_tiers=TRUSTED_OWNER_TIERS)
-    loop = UltraLoop(args.workspace, panel=engine, broker=broker)
+
+    # -- worker selection (router default; deepagents optional) ------------
+    model = pool.routes[0] if getattr(pool, "routes", None) else "mock-a"
+    client = pool.client_for(model)
+    fixer = builder = None
+    fixer_choice = resolve_worker_choice("fixer", args.fixer or args.worker,
+                                         args.task, args.risk)
+    builder_choice = resolve_worker_choice("builder", args.builder or args.worker,
+                                           args.task, args.risk,
+                                           needs_build=args.build)
+    tr = default_test_runner(broker)
+    try:
+        if not args.no_fix:
+            fw = select_worker(fixer_choice, client=client, model=model,
+                               base_url=_worker_base_url(args),
+                               api_key=_worker_api_key(args))
+            fixer = worker_as_fixer(fw, test_runner=tr, test_cmd=args.test_cmd,
+                                    timeout=600)
+        if args.build:
+            bw = select_worker(builder_choice, client=client, model=model,
+                               base_url=_worker_base_url(args),
+                               api_key=_worker_api_key(args))
+            builder = worker_as_builder(bw, test_cmd=args.test_cmd)
+    except RuntimeError as e:   # deepagents extra not installed
+        print(f"worker error: {e}")
+        return 2
+
+    loop = UltraLoop(args.workspace, panel=engine, broker=broker,
+                     fixer=fixer, builder=builder)
     rep = loop.run(args.task, risk=args.risk, test_cmd=args.test_cmd,
                    evidence_dirs=args.evidence_dir or [],
                    do_fix=not args.no_fix, allow_large=args.allow_large)
-    print(f"\nSHIPPED: {rep.shipped}\n{rep.ship_reason}")
+    print(f"\nworker: fixer={fixer_choice}"
+          + (f" builder={builder_choice}" if args.build else ""))
+    print(f"SHIPPED: {rep.shipped}\n{rep.ship_reason}")
     print(f"artifacts: {rep.artifact_dir}")
     return 0 if rep.shipped else 1
+
+
+def _worker_base_url(args) -> str:
+    from .doctor import effective_config
+    try:
+        return effective_config(getattr(args, "config", "") or "")["base_url"]
+    except Exception:
+        return "http://127.0.0.1:4000/v1"
+
+
+def _worker_api_key(args) -> str:
+    import os
+    from .doctor import effective_config
+    try:
+        env = effective_config(getattr(args, "config", "") or "")["api_key_env"]
+        return os.environ.get(env, "")
+    except Exception:
+        return ""
 
 
 def _classify(args) -> int:
@@ -141,6 +191,18 @@ def main(argv=None) -> int:
     up.add_argument("--evidence-dir", action="append")
     up.add_argument("--no-fix", action="store_true")
     up.add_argument("--allow-large", action="store_true")
+    up.add_argument("--worker", default="auto",
+                    choices=["auto", "router", "deepagents"],
+                    help="worker runtime for builder+fixer (default auto: "
+                         "router for fixes, deepagents for builds when installed)")
+    up.add_argument("--builder", default="",
+                    choices=["", "auto", "router", "deepagents"],
+                    help="override the builder worker")
+    up.add_argument("--fixer", default="",
+                    choices=["", "auto", "router", "deepagents"],
+                    help="override the fixer worker")
+    up.add_argument("--build", action="store_true",
+                    help="run the optional build phase before tests")
     up.set_defaults(func=_ultra)
 
     cp = sub.add_parser("classify", help="classify a command's risk tier")
@@ -152,6 +214,8 @@ def main(argv=None) -> int:
     dp = sub.add_parser("doctor", help="verify the install end to end")
     dp.add_argument("--live", action="store_true",
                     help="also probe the configured model endpoint")
+    dp.add_argument("--deepagents", action="store_true",
+                    help="also check the optional Deep Agents worker extra")
     dp.set_defaults(func=run_doctor)
 
     ip = sub.add_parser("init", help="scaffold config + artifact dirs here")

@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Hybrid worker layer** (`agent_ultra.workers`). Ultra stays the supervisor
+  (build → test → panel → classify → fix → re-test → re-panel → proof gate);
+  a *worker* fills only the builder/fixer slots.
+  - `RouterWorker` — the default. Stdlib, one model call per fix, returns an
+    advisory single-file edit the loop applies with automatic rollback.
+  - `DeepAgentsWorker` — **optional** multi-step builder/fixer wrapping
+    LangChain Deep Agents, for from-scratch multi-file work. Guarded import:
+    never loaded unless selected; requires the `deepagents` extra.
+  - `select.resolve_worker_choice` auto policy: router for one-file/finding
+    repairs, Deep Agents for builds and escalated repairs.
+  - Both workers normalize to one `WorkerResult`
+    (`{worker, status, summary, files_changed, commands_run, proof, error}`),
+    so the loop is worker-agnostic. Workers never bypass the gates — edits
+    still flow through tests, the panel, and the proof artifacts.
+- Optional extra `agent-ultra-kit[deepagents]` (deepagents + langchain +
+  langchain-openai + langgraph). Core install stays **zero-dependency**.
+- `agent-ultra ultra --worker/--builder/--fixer/--build` for worker selection;
+  `agent-ultra doctor --deepagents` reports optional-extra availability
+  (absence is a PASS — it is never required).
+
 ### Fixed
 - `install.cmd` is now stored with verbatim CRLF line endings (via
   `.gitattributes` `-text`) so `curl | cmd` receives a parseable batch file;

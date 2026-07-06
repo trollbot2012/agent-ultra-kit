@@ -55,6 +55,28 @@ pytest -q
 
 Zero runtime dependencies — stdlib only.
 
+### Optional: the Deep Agents worker
+
+The default worker is the **router worker** — stdlib, one model call per fix,
+portable, Windows-native. For heavy *from-scratch multi-file builds* you can
+add the optional **Deep Agents worker** (LangChain Deep Agents). It is never
+required; install it only if you want it:
+
+```bash
+pip install "agent-ultra-kit[deepagents]"
+agent-ultra doctor --deepagents      # reports whether the extra is installed
+```
+
+Then select it per run:
+
+```bash
+agent-ultra ultra "build a multi-file service" --workspace . --build --worker deepagents
+agent-ultra ultra "fix the panel finding"     --workspace . --fixer router   # default
+```
+
+Without the extra, `--worker deepagents` fails with a clear install hint and
+the core install keeps working with zero dependencies.
+
 ## 3. AI-agent handoff install
 
 Paste this prompt into your own AI coding agent (Claude Code, Cursor, aider,

@@ -26,6 +26,15 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+# Optional heavy worker: LangChain Deep Agents as a multi-file builder/fixer.
+# The core install stays zero-dependency; install this extra only if you want
+# the Deep Agents worker:  pip install agent-ultra-kit[deepagents]
+deepagents = [
+    "deepagents",
+    "langchain",
+    "langchain-openai",
+    "langgraph",
+]
 
 [project.urls]
 Homepage = "https://github.com/trollbot2012/agent-ultra-kit"
