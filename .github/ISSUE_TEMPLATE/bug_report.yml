@@ -1,0 +1,54 @@
+name: "Bug report"
+description: Something in the panel, ULTRA loop, broker, or a core module behaves wrong
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "For install/doctor/demo failures use the *Install problem* template instead."
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - panel
+        - ultra_loop
+        - broker
+        - proof gates
+        - evidence reader
+        - routes / client
+        - artifacts
+        - memory hooks
+        - CLI
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What you expected to happen, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Smallest code or command that shows the bug. Prefer the `--mock` route so it runs offline and deterministically.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "output of `python -c 'import agent_ultra; print(agent_ultra.__version__)'`"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS + Python
+      placeholder: "Windows 11 / Python 3.12"
+    validations:
+      required: true

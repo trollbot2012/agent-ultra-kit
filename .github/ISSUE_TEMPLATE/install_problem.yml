@@ -1,0 +1,52 @@
+name: "Install problem"
+description: The installer, doctor, or demo failed
+title: "[install] "
+labels: ["install"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. First run `agent-ultra doctor` — it names the
+        failing layer — and skim [docs/troubleshooting.md](https://github.com/trollbot2012/agent-ultra-kit/blob/main/docs/troubleshooting.md).
+  - type: dropdown
+    id: method
+    attributes:
+      label: Install method
+      options:
+        - One-command (PowerShell / install.ps1)
+        - One-command (Linux/macOS / install.sh)
+        - One-command (Windows CMD / install.cmd)
+        - pip / uv
+        - Clone + pip install -e
+        - AI-agent handoff prompt
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "Windows 11 / Ubuntu 24.04 / macOS 14"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "output of `python --version`"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`agent-ultra doctor` output"
+      description: Paste the full output. Redact anything sensitive.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: The exact command you ran and the error. Redact secrets/paths.
+    validations:
+      required: true

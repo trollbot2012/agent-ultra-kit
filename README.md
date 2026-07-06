@@ -13,7 +13,23 @@ Born from a real result: a small auth service passed 16/16 tests while an
 adversarial panel found 8 real production-safety issues with **zero overlap**.
 Green tests alone are not enough.
 
-## Install (pick one)
+## How to give this to your AI agent
+
+The fastest way in: paste this into Claude Code, Cursor, aider, or your own
+agent, and it installs, configures, and proves the kit for you.
+
+> Install agent-ultra-kit into this project and prove it works.
+> Install with `pip install git+https://github.com/trollbot2012/agent-ultra-kit.git`,
+> run `agent-ultra init`, then `agent-ultra doctor` and `agent-ultra demo` and
+> show me the output — the demo must end with "DEMO PASSED". Then run
+> `agent-ultra panel "Is this module production-safe?" --evidence-dir ./src`
+> (add `--mock` if I have no model endpoint configured). If anything fails,
+> read docs/troubleshooting.md in the repo, fix it, and rerun.
+
+The full handoff prompt (with model-route config and rollback) is in
+[INSTALL.md](INSTALL.md#3-ai-agent-handoff-install).
+
+## Install it yourself (pick one)
 
 **One command — Windows PowerShell:**
 
@@ -27,38 +43,57 @@ irm https://raw.githubusercontent.com/trollbot2012/agent-ultra-kit/main/install.
 curl -fsSL https://raw.githubusercontent.com/trollbot2012/agent-ultra-kit/main/install.sh | bash
 ```
 
+**One command — Windows CMD:**
+
+```bat
+curl -fsSL https://raw.githubusercontent.com/trollbot2012/agent-ultra-kit/main/install.cmd -o install.cmd && install.cmd
+```
+
 **pip / uv:**
 
 ```bash
 pip install git+https://github.com/trollbot2012/agent-ultra-kit.git
 ```
 
-**Hand it to your AI agent:** paste the install prompt from
-[INSTALL.md](INSTALL.md#3-ai-agent-handoff-install) into Claude Code / Cursor /
-your own agent and let it install, configure, and verify for you.
+## See it work (no API key)
 
-Every path ends the same way — prove it works, no API key required:
+Every install path ends by proving itself. This is a real, unedited run of the
+offline demo — the deterministic mock route drives the whole loop, so it works
+on any machine with zero configuration:
 
-```bash
-agent-ultra doctor    # 8-point health check (offline)
-agent-ultra demo      # full panel + broker + ULTRA loop, offline, ~2s
-```
+```console
+$ agent-ultra doctor
+  [PASS] python 3.12.13  — need >= 3.10
+  [PASS] agent_ultra 0.1.0 importable
+  [PASS] config source: (defaults + env)  — routes=gpt-4o-mini base=http://127.0.0.1:4000/v1
+  [WARN] model route configured (key env OPENAI_API_KEY NOT set)  — offline mock works regardless
+  [PASS] artifact dir writable: panel-runs
+  [PASS] command broker: safe auto-runs, dangerous denies, ledger written
+  [PASS] panel demo: 3 findings, 3 accepted, decision produced
+  [PASS] ULTRA demo: build->test->panel->fix loop->proof artifacts
+  [PASS] secret hygiene: redaction active, no secrets in artifacts
+Result: 8 pass, 1 warn, 0 fail
 
-## 60 seconds, no API key
+$ agent-ultra demo
+[ok] panel: 3 findings, 3 accepted -> Fix the empty-token acceptance before shipping...
+[ok] broker: safe=passed, dangerous=denied (deny-by-default)
+[ok] ultra: tests green -> panel -> 3 fix task(s) -> fix loop -> proof saved
+DEMO PASSED — the full loop works on this machine.
 
-```bash
-agent-ultra --mock panel "Is this auth service safe?" --lenses security,correctness
-```
+$ agent-ultra --mock panel "Is this auth service safe?" --lenses security,correctness,failure-modes
+DECISION: Fix the empty-token acceptance before shipping; schedule the None-return validation.
 
-```
-DECISION: Fix the empty-token acceptance before shipping; ...
-
-verdicts: {'real_now': 2, 'real_later': 0, 'theoretical': 0, 'wrong': 0, 'unjudged': 0}
-  [real_now/critical] (security) Empty or whitespace-only token is accepted...
-  [real_now/critical] (correctness) Return value is unvalidated...
+verdicts: {'real_now': 3, 'real_later': 0, 'theoretical': 0, 'wrong': 0, 'unjudged': 0}
+  [real_now/critical] (security) Empty or whitespace-only token is accepted as authenticated
+                                 because the check only tests for key presence, not value.
+  [real_now/critical] (correctness) Return value is unvalidated: a None result from the lookup
+                                    propagates to the caller and crashes downstream formatting.
+  [real_now/critical] (failure-modes) No timeout on the outbound call; a hung dependency stalls
+                                      the worker pool indefinitely.
 
 proof gates:
   $ grep -n 'token' service.py
+  $ grep -n 'return' service.py
 ```
 
 Then point it at a real model (any OpenAI-compatible endpoint — OpenAI,

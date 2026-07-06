@@ -1,0 +1,46 @@
+name: "Adapter request"
+description: Request (or propose) an adapter for a model backend, runtime, memory system, or sandbox
+title: "[adapter] "
+labels: ["adapter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The core needs only a `ChatClient.complete(model, prompt, max_tokens) -> str`.
+        Many backends already work through the built-in `OpenAIChatClient` — check
+        [docs/adapter-guide.md](https://github.com/trollbot2012/agent-ultra-kit/blob/main/docs/adapter-guide.md)
+        before requesting a new one.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Adapter kind
+      options:
+        - Model backend / route
+        - Agent runtime (builder + fixer seams)
+        - Memory system (write-back hooks)
+        - Execution sandbox (broker sandbox_argv)
+        - Approval gate (broker approver)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target
+      placeholder: "e.g. Anthropic Messages API, LangGraph, Redis memory, Firecracker sandbox"
+    validations:
+      required: true
+  - type: textarea
+    id: interface
+    attributes:
+      label: Interface it exposes
+      description: How does one call it? Link its docs/SDK. Does it speak OpenAI `/chat/completions`? If not, what is the call shape?
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Auth model, streaming needs, health-probe quirks, whether you can help implement it.
+    validations:
+      required: false
