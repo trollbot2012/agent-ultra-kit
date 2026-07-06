@@ -43,7 +43,7 @@ echo NOTE: add %BIN% to your PATH, or call the shim by full path.
 echo.
 "%VENV%\Scripts\agent-ultra.exe" doctor
 if errorlevel 1 (
-  echo Doctor reported failures — see docs/troubleshooting.md
+  echo Doctor reported failures - see docs/troubleshooting.md
   exit /b 1
 )
 echo.
