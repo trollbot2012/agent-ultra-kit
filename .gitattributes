@@ -1,10 +1,15 @@
 # Normalize line endings so installers work on every platform.
 * text=auto
 
-# Windows shells REQUIRE CRLF — LF-only batch/PS files misparse.
-*.cmd  text eol=crlf
-*.bat  text eol=crlf
-*.ps1  text eol=crlf
+# Windows batch REQUIRES CRLF. `eol=crlf` only fixes working-tree checkouts;
+# raw.githubusercontent.com serves the git BLOB, which is normalized to LF for
+# `text` files. Mark these `-text` (verbatim bytes) so the committed blob keeps
+# real CRLF and `curl | cmd` gets a parseable file. The files are authored CRLF.
+*.cmd  -text
+*.bat  -text
+
+# PowerShell parses LF fine (irm | iex), so ps1 can stay LF-normalized.
+*.ps1  text eol=lf
 
 # POSIX shell scripts REQUIRE LF — CRLF breaks the shebang / `bash`.
 *.sh   text eol=lf
