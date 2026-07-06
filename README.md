@@ -159,7 +159,8 @@ Full guide: [docs/adapter-guide.md](docs/adapter-guide.md).
 [ULTRA loop](docs/ultra-loop.md) · [command broker](docs/command-broker.md) ·
 [proof gates](docs/proof-gates.md) · [adapter guide](docs/adapter-guide.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
-[INSTALL](INSTALL.md)
+[releasing](docs/releasing.md) · [INSTALL](INSTALL.md) ·
+[CHANGELOG](CHANGELOG.md)
 
 ## Security posture (short version)
 

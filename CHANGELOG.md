@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the README.
 - Issue templates: install problem, adapter request, bug report, security
   concern.
+- PyPI release workflow (`.github/workflows/release.yml`) using **Trusted
+  Publishing (OIDC)** — no stored token. Fires only on `v*` tags, gates on
+  tests + tag/version match + build + `twine check`, publishes only if all
+  pass, and supports a build-only / TestPyPI dry run via manual dispatch.
+  Not yet wired to a live PyPI project (setup pending). See
+  [docs/releasing.md](docs/releasing.md).
 
 ### Verified
 - `install.sh` exercised in a clean `python:3.12-slim` Linux container from the
