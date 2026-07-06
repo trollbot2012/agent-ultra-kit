@@ -1,0 +1,18 @@
+# agent-ultra.yaml — flat key: value config (env vars AGENT_ULTRA_* override).
+# Copy to agent-ultra.yaml (or run `agent-ultra init`).
+# SAFE DEFAULTS: no key here, only the NAME of the env var that holds it.
+
+# OpenAI-compatible endpoint (OpenAI, LiteLLM, vLLM, Ollama, LM Studio...)
+base_url: http://127.0.0.1:4000/v1
+
+# Name of the environment variable holding your API key. NEVER the key itself.
+api_key_env: OPENAI_API_KEY
+
+# Comma-separated model names/aliases your endpoint serves.
+routes: gpt-4o-mini
+
+# single = one route runs every panel role; mixed = spread across routes.
+mode: single
+
+# Where panel/ULTRA artifacts are written.
+artifact_dir: ./panel-runs

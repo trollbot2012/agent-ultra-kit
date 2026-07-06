@@ -1,0 +1,341 @@
+"""Self-installer, health checker, and offline demo.
+
+    agent-ultra init      scaffold config + artifact dirs in the current dir
+    agent-ultra doctor    verify the install end to end (offline by default)
+    agent-ultra demo      run the panel + broker + ULTRA loop offline
+
+The doctor proves a working install WITHOUT any API key: the panel and ULTRA
+checks run on the deterministic mock route. A configured live route is probed
+only with --live (so doctor never hangs on a dead endpoint by default).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+
+CONFIG_TEMPLATE = """\
+# agent-ultra.yaml — flat key: value config (env vars AGENT_ULTRA_* override).
+# SAFE DEFAULTS: no key here, only the NAME of the env var that holds it.
+
+# OpenAI-compatible endpoint (OpenAI, LiteLLM, vLLM, Ollama, LM Studio...)
+base_url: http://127.0.0.1:4000/v1
+
+# Name of the environment variable holding your API key. NEVER the key itself.
+api_key_env: OPENAI_API_KEY
+
+# Comma-separated model names/aliases your endpoint serves.
+routes: gpt-4o-mini
+
+# single = one route runs every panel role; mixed = spread across routes.
+mode: single
+
+# Where panel/ULTRA artifacts are written.
+artifact_dir: ./panel-runs
+"""
+
+ENV_TEMPLATE = """\
+# Copy to .env (which is gitignored) and fill in. NEVER commit real keys.
+# The kit reads the VARIABLE NAMED by api_key_env / AGENT_ULTRA_API_KEY_ENV.
+OPENAI_API_KEY=replace-me
+# Optional overrides (take precedence over agent-ultra.yaml):
+# AGENT_ULTRA_BASE_URL=http://127.0.0.1:4000/v1
+# AGENT_ULTRA_ROUTES=gpt-4o-mini
+# AGENT_ULTRA_API_KEY_ENV=OPENAI_API_KEY
+"""
+
+_DEMO_SOURCE = '''"""Toy auth service (demo target)."""
+SESSIONS = {}
+
+def authenticate(request):
+    # BUG: only checks the header KEY exists, not that the token is non-empty
+    return "token" in request.headers
+
+def login(user, token):
+    SESSIONS[user] = {"token": token}
+    return SESSIONS[user]
+
+def logout(user):
+    SESSIONS.pop(user, None)
+'''
+
+
+def load_simple_yaml(path) -> dict:
+    """Flat `key: value` subset — comments (#) and blank lines ignored.
+    Deliberately tiny so the kit stays stdlib-only."""
+    cfg: dict = {}
+    try:
+        for raw in Path(path).read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, _, val = line.partition(":")
+            cfg[key.strip()] = val.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def effective_config(config_path: str = "") -> dict:
+    """config file < env vars. Returns base_url/api_key_env/routes/mode/
+    artifact_dir with safe defaults."""
+    path = config_path or os.environ.get("AGENT_ULTRA_CONFIG", "agent-ultra.yaml")
+    cfg = load_simple_yaml(path) if Path(path).exists() else {}
+    out = {
+        "base_url": os.environ.get("AGENT_ULTRA_BASE_URL")
+        or cfg.get("base_url", "http://127.0.0.1:4000/v1"),
+        "api_key_env": os.environ.get("AGENT_ULTRA_API_KEY_ENV")
+        or cfg.get("api_key_env", "OPENAI_API_KEY"),
+        "routes": [r.strip() for r in (os.environ.get("AGENT_ULTRA_ROUTES")
+                                       or cfg.get("routes", "gpt-4o-mini")
+                                       ).split(",") if r.strip()],
+        "mode": os.environ.get("AGENT_ULTRA_MODE") or cfg.get("mode", "single"),
+        "artifact_dir": os.environ.get("AGENT_ULTRA_ARTIFACT_DIR")
+        or cfg.get("artifact_dir", "./panel-runs"),
+        "config_file": str(path) if Path(path).exists() else "",
+    }
+    return out
+
+
+# --------------------------------------------------------------------------
+# demo pieces (offline, deterministic — shared by `demo` and `doctor`)
+# --------------------------------------------------------------------------
+
+def panel_demo(out_dir: Path):
+    from ..routes.pool import RoutePool
+    from ..routes.mock import demo_panel_client
+    from ..panel.engine import PanelEngine
+    pool = RoutePool(["mock-a"], client=demo_panel_client())
+    report = PanelEngine(pool).run(
+        "Is this authentication function safe for production?",
+        size="small", lenses=["security", "correctness", "failure-modes"],
+        context=_DEMO_SOURCE)
+    ok = bool(report.findings) and bool(report.decision) and report.accepted
+    return ok, report
+
+
+def broker_demo(out_dir: Path):
+    from ..broker.broker import CommandBroker, TRUSTED_OWNER_TIERS
+    ledger = out_dir / "broker-demo.jsonl"
+    b = CommandBroker(ledger_path=ledger, auto_run_tiers=TRUSTED_OWNER_TIERS)
+    safe = b.run("echo agent-ultra-doctor")
+    danger = b.run("rm -rf demo-guard")
+    ok = (safe.status == "passed" and danger.status == "denied"
+          and ledger.exists()
+          and len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2)
+    return ok, {"safe": safe.status, "dangerous": danger.status,
+                "ledger": str(ledger)}
+
+
+def ultra_demo(out_dir: Path):
+    from ..routes.pool import RoutePool
+    from ..routes.mock import demo_panel_client
+    from ..panel.engine import PanelEngine
+    from ..broker.broker import CommandBroker, TRUSTED_OWNER_TIERS
+    from ..ultra_loop.loop import UltraLoop, TestResult
+
+    ws = out_dir / "ultra-demo"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "service.py").write_text(_DEMO_SOURCE, encoding="utf-8")
+    engine = PanelEngine(RoutePool(["mock-a"], client=demo_panel_client()))
+    broker = CommandBroker(ledger_path=ws / ".ultra" / "broker.jsonl",
+                           auto_run_tiers=TRUSTED_OWNER_TIERS)
+    fixed = []
+
+    def fake_tests(workspace, cmd, timeout):
+        return TestResult(cmd or "pytest", 0, True, "16 passed", 0.1)
+
+    def fake_fixer(task, workspace):
+        fixed.append(task.claim)
+        return True
+
+    loop = UltraLoop(ws, panel=engine, broker=broker,
+                     test_runner=fake_tests, fixer=fake_fixer)
+    rep = loop.run("implement token authentication", risk="high",
+                   test_cmd="pytest -q")
+    # a correct offline run: tests green, panel ran, findings became fix
+    # tasks, fixes were applied, artifacts + proof gates written, and the
+    # gate HOLDS (the deterministic mock re-panel repeats its findings).
+    ok = (rep.tests_before.get("passed") is True and rep.panel_ran
+          and len(fixed) >= 1
+          and any(t["status"] == "fixed" for t in rep.fix_tasks)
+          and Path(rep.artifact_dir).exists())
+    return ok, rep
+
+
+def run_demo(args) -> int:
+    out = Path(tempfile.mkdtemp(prefix="agent-ultra-demo-"))
+    print("agent-ultra demo (offline, deterministic mock route)\n")
+    ok1, report = panel_demo(out)
+    print(f"[{'ok' if ok1 else 'FAIL'}] panel: {len(report.findings)} findings, "
+          f"{len(report.accepted)} accepted -> {report.decision[:70]}")
+    ok2, b = broker_demo(out)
+    print(f"[{'ok' if ok2 else 'FAIL'}] broker: safe={b['safe']}, "
+          f"dangerous={b['dangerous']} (deny-by-default)")
+    ok3, rep = ultra_demo(out)
+    print(f"[{'ok' if ok3 else 'FAIL'}] ultra: tests green -> panel -> "
+          f"{len(rep.fix_tasks)} fix task(s) -> fix loop -> proof saved")
+    print(f"\nartifacts: {out}")
+    all_ok = ok1 and ok2 and ok3
+    print("\nDEMO " + ("PASSED — the full loop works on this machine."
+                       if all_ok else "FAILED — run `agent-ultra doctor`."))
+    return 0 if all_ok else 1
+
+
+# --------------------------------------------------------------------------
+# doctor
+# --------------------------------------------------------------------------
+
+def run_doctor(args) -> int:
+    results: list[tuple[str, str, str]] = []
+
+    def add(status, name, detail=""):
+        results.append((status, name, detail))
+
+    # 1. python version
+    v = sys.version_info
+    add(PASS if v >= (3, 10) else FAIL,
+        f"python {v.major}.{v.minor}.{v.micro}", "need >= 3.10")
+
+    # 2. package + version
+    try:
+        import agent_ultra
+        add(PASS, f"agent_ultra {agent_ultra.__version__} importable")
+    except Exception as e:
+        add(FAIL, "agent_ultra import", str(e)[:120])
+        _print(results)
+        return 1
+
+    # 3. config / route
+    cfg = effective_config(getattr(args, "config", "") or "")
+    src = cfg["config_file"] or "(defaults + env)"
+    add(PASS, f"config source: {src}",
+        f"routes={','.join(cfg['routes'])} base={cfg['base_url']}")
+    key_set = bool(os.environ.get(cfg["api_key_env"], ""))
+    if getattr(args, "live", False):
+        try:
+            from ..routes.client import OpenAIChatClient
+            from ..routes.pool import RoutePool
+            client = OpenAIChatClient(cfg["base_url"],
+                                      api_key_env=cfg["api_key_env"], timeout=15)
+            pool = RoutePool(cfg["routes"], client=client)
+            healthy = pool.probe_all()
+            add(PASS if healthy else FAIL,
+                f"live route probe: {len(healthy)}/{len(cfg['routes'])} healthy",
+                str(pool.health_report()["health"]))
+        except Exception as e:
+            add(FAIL, "live route probe", str(e)[:120])
+    else:
+        add(PASS if key_set else WARN,
+            f"model route configured (key env {cfg['api_key_env']} "
+            f"{'set' if key_set else 'NOT set'})",
+            "offline mock works regardless; use --live to probe the endpoint")
+
+    # 4. write permissions + artifact dir
+    art = Path(cfg["artifact_dir"])
+    try:
+        art.mkdir(parents=True, exist_ok=True)
+        probe = art / ".doctor-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        add(PASS, f"artifact dir writable: {art}")
+    except OSError as e:
+        add(FAIL, f"artifact dir writable: {art}", str(e)[:120])
+
+    scratch = Path(tempfile.mkdtemp(prefix="agent-ultra-doctor-"))
+
+    # 5. command broker enabled + deny-by-default intact
+    try:
+        ok, detail = broker_demo(scratch)
+        add(PASS if ok else FAIL,
+            "command broker: safe auto-runs, dangerous denies, ledger written",
+            json.dumps(detail)[:120])
+    except Exception as e:
+        add(FAIL, "command broker", str(e)[:120])
+
+    # 6. panel demo (offline)
+    try:
+        ok, report = panel_demo(scratch)
+        add(PASS if ok else FAIL,
+            f"panel demo: {len(report.findings)} findings, "
+            f"{len(report.accepted)} accepted, decision produced")
+    except Exception as e:
+        add(FAIL, "panel demo", str(e)[:160])
+
+    # 7. ultra demo (offline)
+    try:
+        ok, rep = ultra_demo(scratch)
+        add(PASS if ok else FAIL,
+            "ULTRA demo: build->test->panel->fix loop->proof artifacts")
+    except Exception as e:
+        add(FAIL, "ULTRA demo", str(e)[:160])
+
+    # 8. secret hygiene: redaction works, and nothing the demos wrote leaks
+    try:
+        from ..evidence.reader import redact_secrets, find_secrets
+        canary = "sk-" + "canary0123456789abcdef"
+        redacts = canary not in redact_secrets(f"key = {canary}")
+        leaked = []
+        for f in scratch.rglob("*"):
+            if f.is_file():
+                try:
+                    leaked += find_secrets(f.read_text(encoding="utf-8",
+                                                       errors="ignore"))
+                except OSError:
+                    pass
+        add(PASS if (redacts and not leaked) else FAIL,
+            "secret hygiene: redaction active, no secrets in artifacts",
+            f"{len(leaked)} leak(s) found" if leaked else "")
+    except Exception as e:
+        add(FAIL, "secret hygiene", str(e)[:120])
+
+    _print(results)
+    return 1 if any(s == FAIL for s, _, _ in results) else 0
+
+
+def _print(results) -> None:
+    print("agent-ultra doctor\n")
+    for status, name, detail in results:
+        line = f"  [{status}] {name}"
+        if detail:
+            line += f"  — {detail}"
+        print(line)
+    n = {s: sum(1 for r in results if r[0] == s) for s in (PASS, WARN, FAIL)}
+    print(f"\nResult: {n[PASS]} pass, {n[WARN]} warn, {n[FAIL]} fail")
+    if n[FAIL]:
+        print("See docs/troubleshooting.md")
+
+
+# --------------------------------------------------------------------------
+# init
+# --------------------------------------------------------------------------
+
+def run_init(args) -> int:
+    target = Path(getattr(args, "dir", ".") or ".").resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", False)
+    wrote = []
+    for name, content in (("agent-ultra.yaml", CONFIG_TEMPLATE),
+                          (".env.example", ENV_TEMPLATE)):
+        p = target / name
+        if p.exists() and not force:
+            print(f"  kept existing {p} (use --force to overwrite)")
+            continue
+        p.write_text(content, encoding="utf-8")
+        wrote.append(p)
+        print(f"  wrote {p}")
+    art = target / "panel-runs"
+    art.mkdir(exist_ok=True)
+    print(f"  ensured {art}")
+    print("\nNext steps:")
+    print("  1. copy .env.example to .env and set your key (or skip — the")
+    print("     mock route needs no key: try `agent-ultra demo`)")
+    print("  2. edit agent-ultra.yaml (endpoint + model routes)")
+    print("  3. run `agent-ultra doctor` (add --live to probe your endpoint)")
+    print('  4. run `agent-ultra panel "your question" --evidence-dir ./src`')
+    return 0
