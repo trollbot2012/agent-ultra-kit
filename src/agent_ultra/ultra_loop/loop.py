@@ -90,6 +90,10 @@ class UltraReport:
     shipped: bool = False
     ship_reason: str = ""
     artifact_dir: str = ""
+    # structural PANEL enforcement: a self-review cannot satisfy PANEL
+    receipt_path: str = ""
+    artifact_hash: str = ""
+    panel_enforced: bool = False
     duration_s: float = 0.0
 
 
@@ -128,6 +132,7 @@ class UltraLoop:
                     "context_max_chars": 24000, "gather_max_files": 40}
         if config:
             self.cfg.update(config)
+        self._receipt_path = ""   # set by _write_panel_receipt (enforcement)
 
     def run(self, task: str, risk: str = "medium", context: str = "",
             evidence_dirs=None, test_cmd: str | None = None, lenses=None,
@@ -181,6 +186,11 @@ class UltraLoop:
         p1 = self._run_panel(task, ctx, size, lenses, ev_dirs, allow_large)
         rep.panel_ran = True
         rep.panel1 = self._panel_summary(p1)
+        # STRUCTURAL PANEL ENFORCEMENT: write an execution receipt from the REAL
+        # PanelReport (model_calls, lenses, per-finding origins). A self-review
+        # cannot forge this — it never produces model_calls > 0. The receipt
+        # gates REPORT (Level 1 in _finish; gate_report() for callers/CLI).
+        rep.artifact_hash = self._write_panel_receipt(p1, task, ctx, art_dir)
         blocking = self._blocking(p1)
 
         # 4/5. CLASSIFY -> FIX
@@ -244,6 +254,21 @@ class UltraLoop:
                              max_total_chars=self.cfg["context_max_chars"])
         return ev.text
 
+    def _write_panel_receipt(self, report, task, ctx, art_dir) -> str:
+        """Build + write the panel execution receipt from the REAL report.
+        Returns the artifact_hash (sha256 of the reviewed input). Never raises."""
+        try:
+            from ..panel_receipt import build_receipt, write_receipt
+            receipt = build_receipt(
+                report, task_id=slug(task), reviewed_input=ctx or "",
+                panel_artifact_path=str(Path(art_dir)))
+            write_receipt(art_dir, receipt)
+            self._receipt_path = str(Path(art_dir) / "panel_execution_receipt.json")
+            return receipt.get("artifact_hash", "")
+        except Exception:
+            self._receipt_path = ""
+            return ""
+
     def _run_panel(self, task, ctx, size, lenses, ev_dirs, allow_large):
         question = (
             f"Adversarial production-safety review. Task implemented: {task}. "
@@ -270,6 +295,26 @@ class UltraLoop:
 
     def _finish(self, rep: UltraReport, art_dir: Path, t0: float) -> UltraReport:
         rep.duration_s = round(time.time() - t0, 2)
+        # LEVEL 1 PANEL ENFORCEMENT — the transition into REPORT. When a panel
+        # was claimed (panel_ran), a valid execution receipt with real executed
+        # lenses MUST exist. A self-review labelled PANEL cannot pass: it
+        # produces no receipt with lens_count_executed > 0. On failure the run
+        # cannot ship and REPORT records the exact failure message.
+        if rep.panel_ran:
+            rep.receipt_path = getattr(self, "_receipt_path", "") or str(
+                art_dir / "panel_execution_receipt.json")
+            try:
+                from ..panel_receipt import validate_receipt
+                ok, msg = validate_receipt(
+                    rep.receipt_path, expect_task_id=slug(rep.task),
+                    expect_artifact_hash=rep.artifact_hash or "")
+            except Exception as e:
+                ok, msg = False, ("REPORT blocked: missing or invalid panel "
+                                  f"execution receipt. ({e})")
+            rep.panel_enforced = ok
+            if not ok:
+                rep.shipped = False
+                rep.ship_reason = msg
         rec = RunRecord(kind="ultra", question=rep.task, run_id=f"ultra-{slug(rep.task)}",
                         started_utc=rep.started_utc, duration_s=rep.duration_s,
                         decision=rep.ship_reason,

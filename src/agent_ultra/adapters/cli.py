@@ -162,6 +162,13 @@ def _classify(args) -> int:
     return 0
 
 
+def _panel_gate(args) -> int:
+    from ..panel_receipt import gate_report
+    allowed, msg = gate_report(args.run_dir)
+    print(f"{'ALLOWED' if allowed else 'BLOCKED'}: {msg}")
+    return 0 if allowed else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="agent-ultra",
                                 description="adversarial panel / ULTRA loop / broker")
@@ -208,6 +215,12 @@ def main(argv=None) -> int:
     cp = sub.add_parser("classify", help="classify a command's risk tier")
     cp.add_argument("command")
     cp.set_defaults(func=_classify)
+
+    gp = sub.add_parser("panel-gate",
+                        help="block REPORT unless a valid panel execution "
+                             "receipt proves real panel-agent calls happened")
+    gp.add_argument("run_dir", help="ULTRA run dir (has panel_execution_receipt.json)")
+    gp.set_defaults(func=_panel_gate)
 
     from .doctor import run_doctor, run_init, run_demo
 

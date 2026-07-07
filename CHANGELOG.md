@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Structural PANEL enforcement** (`agent_ultra.panel_receipt`). A phase
+  labelled PANEL is no longer proof — only a valid panel execution receipt with
+  real executed lenses satisfies it. The loop writes
+  `panel_execution_receipt.json` from the REAL `PanelReport` (`model_calls`,
+  `lenses`, per-finding origins) with a mandatory `receipt_sha256` checksum,
+  validates it before REPORT (`UltraReport.panel_enforced`), and
+  `gate_report(run_dir)` / `agent-ultra panel-gate <run_dir>` blocks REPORT
+  unless real panel-agent calls happened. A self-review (0 model calls) yields
+  `lens_count_executed == 0` and fails with
+  `PANEL phase completed with 0 agent calls — self-review is not a panel.`
+  Stdlib, additive; does not weaken the existing proof gates.
 - **Hybrid worker layer** (`agent_ultra.workers`). Ultra stays the supervisor
   (build → test → panel → classify → fix → re-test → re-panel → proof gate);
   a *worker* fills only the builder/fixer slots.

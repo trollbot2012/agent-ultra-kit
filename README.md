@@ -146,6 +146,31 @@ Both workers return the same `WorkerResult` shape, so Ultra never cares which
 one produced a change — the edit still passes tests, the panel, and the proof
 gate before it can ship. **Deep Agents is a worker, not the ship authority.**
 
+### Panel execution receipts — a self-review is not a panel
+
+```
+Tests prove known contracts.
+Panels find unknown failure modes.
+Panel execution receipts prove the panel actually RAN.
+Proof gates decide what ships.
+```
+
+A phase labelled PANEL is not proof. When the loop runs a panel it writes
+`panel_execution_receipt.json` into the run dir, built from the REAL
+`PanelReport` (`model_calls`, `lenses`, per-finding origins) with a mandatory
+integrity checksum. Before REPORT the loop validates it (`UltraReport.
+panel_enforced`), and `agent_ultra.panel_receipt.gate_report(run_dir)` (also
+`agent-ultra panel-gate <run_dir>`) blocks REPORT unless the receipt shows real
+executed lenses. A self-review produces no receipt with `lens_count_executed >
+0`, so it cannot pass:
+
+```
+PANEL phase completed with 0 agent calls — self-review is not a panel.
+REPORT blocked: missing or invalid panel execution receipt.
+```
+
+Stdlib, additive — it does not weaken the existing proof gates.
+
 ## Use it with YOUR agent
 
 Your agent needs exactly one thing — a way to call a model:

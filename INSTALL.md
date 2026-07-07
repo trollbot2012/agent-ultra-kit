@@ -112,7 +112,12 @@ agent-ultra demo            # full offline loop, ends with DEMO PASSED
 agent-ultra init            # scaffold config into the current project
 agent-ultra classify "rm -rf build"       # DANGEROUS: deletes files
 agent-ultra --mock panel "Is this safe?"  # offline panel
+agent-ultra panel-gate <ultra-run-dir>    # block REPORT unless the panel really ran
 ```
+
+After an ULTRA run, `panel-gate` verifies the run's
+`panel_execution_receipt.json` proves real panel-agent calls happened — a
+self-review labelled PANEL is blocked, a real panel receipt is allowed.
 
 Doctor checks: Python version, package import, config/route + key env, write
 permissions + artifact dir, command broker (safe auto-runs / dangerous denies
