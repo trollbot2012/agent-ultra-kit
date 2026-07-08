@@ -2,8 +2,8 @@
 
 Subclass MemoryHooks (all methods are no-ops) and pass an instance to the
 panel engine / ULTRA loop / broker wrapper of your choice. The kit never
-imports a specific memory system; adapters (e.g. the optional Mneme adapter)
-live in agent_ultra.adapters.
+imports a specific memory system; adapters (e.g. the optional external-memory
+adapter) live in agent_ultra.adapters.
 """
 
 from __future__ import annotations

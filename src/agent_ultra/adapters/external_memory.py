@@ -1,12 +1,13 @@
-"""Optional Mneme memory adapter (example of wiring the generic hooks to a
+"""Optional external-memory adapter (example of wiring the generic hooks to a
 real memory system).
 
-Mneme is one such system; this adapter shows the shape without importing it.
-If a `mneme`-like client is available it is used; otherwise events fall back
-to a local JSONL file, so importing this module never fails and never
-requires the dependency.
+This adapter shows the SHAPE of the integration without importing any specific
+memory backend. If a note-writing client is supplied it is used; otherwise
+events fall back to a local JSONL file, so importing this module never fails
+and never requires the dependency.
 
-Replace `_MnemeClientProtocol` calls with your memory system's real API.
+Replace the ``client.write_note(...)`` calls with your memory system's real
+API.
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ from pathlib import Path
 from ..memory.hooks import MemoryHooks, JsonlHooks
 
 
-class MnemeHooks(MemoryHooks):
+class ExternalMemoryHooks(MemoryHooks):
     """Write panel decisions and accepted findings to a memory client.
 
-    client: any object exposing `write_note(kind, title, body, tags)`. Pass
-    your Mneme (or other) client. If None, degrades to a JSONL fallback.
+    client: any object exposing ``write_note(kind, title, body, tags)``. Pass
+    your own memory client. If None, degrades to a JSONL fallback.
     """
 
     def __init__(self, client=None, fallback_path: Path | str | None = None,

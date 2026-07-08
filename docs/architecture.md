@@ -21,7 +21,7 @@ core imports an adapter; adapters may make runtime-specific assumptions.
    cli ── generic shell entrypoint (zero third-party deps)
    litellm_routes ── build a pool over a LiteLLM proxy
    docker_sandbox ── run non-approved commands in a container
-   mneme_memory  ── wire hooks to a memory system
+   external_memory ── wire hooks to a memory system
    hermes / ktisis ── env-driven wiring for those runtimes
 ```
 

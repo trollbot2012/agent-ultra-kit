@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Receipts bus** (`agent_ultra.receipts_bus`). A unified, authenticated
+  receipt index over SQLite (WAL, default auto-checkpoint). Each receipt carries
+  two hashes over its canonical body: `receipt_sha256` (integrity) and a keyed
+  `receipt_hmac` (authenticity) — kept **separate**, so a hand-authored envelope
+  with a valid sha256 but no HMAC is `authentic=False` and rejected by
+  enforce-mode consumers. `kind`/`actor`/`verdict` are closed enums validated at
+  write time. A failed read raises `BusUnavailable` (never an empty list).
+  `resolve` + `binds` implement the claim-binding rule (cited / verify-command
+  with scope+freshness / task_ref; command-, manual-, repair-, route_health-kind
+  never complete; a verifier candidate binds only on `claim_sha256` match; weak
+  evidence yields a distinct `ledger-weak` clause). `append_audit` /
+  `verify_audit` maintain a hash-chained `gate_audit`. New CLI:
+  `agent-ultra receipts list|show|verify|why|attest` (`attest` is
+  interactive-only and writes `kind=manual`, which never satisfies completion).
+- **Verifier** (`agent_ultra.verifier`). Refute-first claim verification with an
+  injected check-runner and judge (no network, no host commands by default).
+  Engine re-check wins when a verify command is declared (exit 0 confirms,
+  non-zero refutes); otherwise a refute-first `judge` runs, defaulting to
+  refuted on insufficient evidence; with neither channel, refuted. Emits a
+  `kind=verifier` receipt stamped with `claim_sha256`; a refuted verdict maps to
+  a non-acceptable receipt verdict so it can never satisfy a gate. `Verifier`
+  wraps it with a configurable escalation budget (per-session/per-window caps +
+  dedup on identical `claim_sha256`).
+- **Leak gate** (`agent_ultra.leakgate`, `agent-ultra-leakgate`). Scans the
+  whole tree (and a commit message / PR body) against a base64 denylist decoded
+  at runtime, so the denylist file never contains plaintext. Case-insensitive
+  except a whole-word case-sensitive collision token; path separators
+  normalised; no file whitelist. Wired into CI as a dedicated job.
+
+### Changed
+- Renamed the optional memory adapter to `agent_ultra.adapters.external_memory`
+  (`ExternalMemoryHooks`) and made the worker-layer leakage test consume the
+  shared base64 denylist, so no host-specific identifier remains in the tree.
+
 - **Structural PANEL enforcement** (`agent_ultra.panel_receipt`). A phase
   labelled PANEL is no longer proof — only a valid panel execution receipt with
   real executed lenses satisfies it. The loop writes
@@ -95,7 +129,7 @@ First public release. Portable, stdlib-only core with thin optional adapters.
 - **Memory hooks** (`agent_ultra.memory`): five generic events, all no-ops by
   default; no memory system required.
 - **Adapters** (all optional, none imported by the core): generic CLI,
-  LiteLLM, Docker sandbox, Mneme-style memory, Hermes-style, Ktisis-style.
+  LiteLLM, Docker sandbox, external-memory, Hermes-style, Ktisis-style.
 - **Install layer**: `agent-ultra doctor` / `init` / `demo`, one-command
   installers for PowerShell / bash / CMD, `config.example.yaml`, `.env.example`,
   `INSTALL.md` with an AI-agent handoff prompt, and a troubleshooting guide.

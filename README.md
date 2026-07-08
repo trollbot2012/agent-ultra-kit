@@ -119,8 +119,8 @@ agent-ultra panel "Is this change production-safe?" --evidence-dir ./src
 | **artifacts** | Uniform JSON + Markdown run records and JSONL ledgers for every run. |
 | **memory** | Five generic write-back hooks (`on_panel_decision`, `on_finding_accepted`, `on_command_run`, `on_task_complete`, `on_lesson_learned`). No memory system required. |
 
-Adapters (all optional): generic CLI, LiteLLM, Docker sandbox, memory
-(Mneme-style), Hermes-style and Ktisis-style runtimes.
+Adapters (all optional): generic CLI, LiteLLM, Docker sandbox, external
+memory, Hermes-style and Ktisis-style runtimes.
 
 ### Workers: router (default) vs Deep Agents (optional)
 

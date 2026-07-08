@@ -169,6 +169,62 @@ def _panel_gate(args) -> int:
     return 0 if allowed else 1
 
 
+def _receipts_bus(args):
+    from ..receipts_bus import ReceiptsBus
+    return ReceiptsBus(db_path=args.db or "", key_path=args.key or "")
+
+
+def _receipts(args) -> int:
+    bus = _receipts_bus(args)
+    sub = args.receipts_cmd
+    if sub == "list":
+        rows = bus.list(session_id=args.session or "", workspace=args.workspace or "")
+        for r in rows:
+            print(f"  {r['receipt_id'][:12]} {r['kind']:<12} {r['verdict']:<10} "
+                  f"{r.get('ts', '')}")
+        print(f"\n{len(rows)} receipt(s)")
+        return 0
+    if sub == "show":
+        r = bus.get(args.receipt_id)
+        if r is None:
+            print("not found", file=sys.stderr)
+            return 1
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0
+    if sub == "verify":
+        res = bus.verify(args.receipt_id)
+        print(f"ok={res['ok']} authentic={res['authentic']} "
+              f"integrity={res['integrity']} refs_ok={res['refs_ok']}")
+        return 0 if res["ok"] else 1
+    if sub == "why":
+        ctx = {"session_id": args.session or "", "workspace": args.workspace or "",
+               "claim_sha256": args.claim_sha or "",
+               "verify_command": args.verify_command or ""}
+        if args.cited:
+            ctx["cited"] = args.cited
+        out = bus.why(ctx)
+        for c in out["candidates"]:
+            mark = "BINDS" if c["binds"] else "     "
+            print(f"  [{mark}] {c['receipt_id'][:12] if c['receipt_id'] else '?':<12} "
+                  f"{c['kind']:<12} {c['clause']} ({c['origin']})")
+        print(f"\nclaim {'BINDS' if out['binds'] else 'is UNSUPPORTED'}")
+        return 0 if out["binds"] else 1
+    if sub == "attest":
+        if not sys.stdin.isatty():
+            print("attest is interactive-only; refusing in non-interactive mode",
+                  file=sys.stderr)
+            return 2
+        note = input("attestation note: ").strip()
+        env = bus.append(kind="manual", actor="operator", verdict="approved",
+                         session_id=args.session or "",
+                         workspace=args.workspace or "",
+                         evidence=[{"type": "note", "value": note}])
+        print(f"wrote manual receipt {env['receipt_id']} "
+              f"(manual receipts never satisfy a completion gate)")
+        return 0
+    return 2
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="agent-ultra",
                                 description="adversarial panel / ULTRA loop / broker")
@@ -221,6 +277,25 @@ def main(argv=None) -> int:
                              "receipt proves real panel-agent calls happened")
     gp.add_argument("run_dir", help="ULTRA run dir (has panel_execution_receipt.json)")
     gp.set_defaults(func=_panel_gate)
+
+    rp = sub.add_parser("receipts",
+                        help="list/show/verify/why/attest authenticated receipts")
+    rp.add_argument("--db", default="", help="receipts store path (default in-memory)")
+    rp.add_argument("--key", default="", help="per-install HMAC key file path")
+    rp.add_argument("--session", default="")
+    rp.add_argument("--workspace", default="")
+    rsub = rp.add_subparsers(dest="receipts_cmd", required=True)
+    rsub.add_parser("list", help="list stored receipts")
+    rs_show = rsub.add_parser("show", help="print one receipt as JSON")
+    rs_show.add_argument("receipt_id")
+    rs_ver = rsub.add_parser("verify", help="check integrity + authenticity")
+    rs_ver.add_argument("receipt_id")
+    rs_why = rsub.add_parser("why", help="explain which receipts bind a claim")
+    rs_why.add_argument("--claim-sha", dest="claim_sha", default="")
+    rs_why.add_argument("--verify-command", dest="verify_command", default="")
+    rs_why.add_argument("--cited", default="")
+    rsub.add_parser("attest", help="write a manual receipt (interactive only)")
+    rp.set_defaults(func=_receipts)
 
     from .doctor import run_doctor, run_init, run_demo
 

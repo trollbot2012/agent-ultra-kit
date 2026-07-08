@@ -143,15 +143,14 @@ def test_worker_as_fixer_rolls_back_on_break(tmp_path):
     assert "reverted" in fx.results[0].error
 
 
-# 11. No private Aletheon/FABLE.5 paths in the worker layer.
+# 11. No private host identifiers in the worker layer. The denylist is the
+# shared base64 file, decoded at runtime, so this test embeds no plaintext.
 def test_no_private_leakage_in_workers():
-    root = Path(__file__).resolve().parents[1] / "src" / "agent_ultra" / "workers"
-    banned = ["aletheon", "waxilliam", "mneme", "mythos-", "sk-hermes",
-              "hermes_home", "AppData", "fable_", "/opt/data"]
-    for p in root.glob("*.py"):
-        text = p.read_text(encoding="utf-8").lower()
-        for b in banned:
-            assert b.lower() not in text, f"{b!r} leaked into {p.name}"
+    from agent_ultra.leakgate import scan_tree
+    root = Path(__file__).resolve().parents[1]
+    hits = [(path, line, tok) for (path, line, tok) in scan_tree(root)
+            if path.startswith("src/agent_ultra/workers/")]
+    assert hits == [], f"private identifiers leaked into the worker layer: {hits}"
 
 
 def test_auto_policy_is_documented():
