@@ -6,7 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **bob commit-lifecycle deadlock (mark/seal split).** Sealing the run inside
+  a pre-commit gate released the ACTIVE marker *before* the commit landed, so
+  a require-run policy blocked the very commit the gate had just validated
+  (and a failed commit left the run wrongly closed). The gate now splits the
+  lifecycle: `bob gate --mark-pass` (pre-commit) validates and records
+  `gate-pass.json` but keeps ACTIVE; the new `bob seal` (post-commit)
+  releases ACTIVE only when a gate pass is recorded, stamping the landed
+  commit hash. New `bob hook-install` writes all three hooks (pre-commit,
+  pre-merge-commit, post-commit); `AGENT_ULTRA_REQUIRE_RUN=1` makes the
+  pipeline mandatory for hook-level commits. `--complete-on-pass` remains
+  for closures outside a commit. `run_bob(..., seal_on_pass=False)` selects
+  the git-workflow lifecycle from Python. Regression test drives the full
+  cycle through real git: proven commit lands, post-commit seals, an
+  unproven follow-up commit is blocked. **If you had wired `bob gate
+  --complete-on-pass` into a pre-commit hook, replace it: run
+  `agent-ultra bob hook-install` to regenerate the hooks.**
+
 ### Added
+- **bob** (`agent_ultra.bob`) — the 10-step enforced build pipeline
+  (SPEC → RED → GREEN → REFACTOR → CODE-QUALITY → SECURITY-FANOUT → WORKFLOW
+  → ULTRA → QUIZ → COMMIT) composing ultracode fan-out, the adversarial
+  panel, the broker's risk tiers, and signed receipts into one loop. Each
+  gated step leaves a hash-chained (`prev_sha256`), HMAC-signed step receipt
+  written from real execution: RED/GREEN receipts come from the pytest
+  runner's actual output (`writer="system"`); the two fan-out steps are
+  cross-checked against ultracode's own checksummed run receipts; ULTRA is
+  proven by the panel execution receipt (a self-review is not a panel); a
+  `passed` quiz needs a captured operator response. The commit/report gate
+  re-runs pytest live, re-hashes covered files (staleness), demands coverage
+  for staged files, and fail-closes on anything it cannot verify — a
+  skipped, fabricated, edited, re-ordered, or hand-authored step blocks.
+  Mock mode (`--mock`, no API key) swaps only the model content for a
+  bundled sample task; pytest, ultracode, the panel, and the gate all really
+  execute. CLI: `agent-ultra bob run|gate|status` (alias: `agent-ultra
+  build`); Python: `run_bob` / `gate_check` / `assert_bob_done`. `doctor`
+  and `demo` prove the pass AND three blocked-fraud scenarios; see
+  [docs/bob-the-builder.md](docs/bob-the-builder.md). Each cross-checked
+  artifact (the ultracode run receipt's file bytes, the panel receipt's
+  task/artifact hashes) is bound into the signed chain, and model-authored
+  file paths are validated against workspace escape; the docs state the
+  trust boundary honestly (no host middleware, unlike the private reference).
+  29 offline tests.
 - **ultracode** (`agent_ultra.ultracode`) — deterministic multi-agent workflow
   engine. Workflows are plain Python modules (`META` + `async def run(wf)`) that
   fan work across bounded agents via `wf.agent` (one model call, optional

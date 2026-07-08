@@ -72,11 +72,12 @@ $ agent-ultra doctor
   [PASS] panel demo: 3 findings, 3 accepted, decision produced
   [PASS] ULTRA demo: build->test->panel->fix loop->proof artifacts
   [PASS] ultracode: fan-out -> journal -> resume (cached) -> valid receipt
+  [PASS] bob: 10-step pipeline gate passes; skipped/faked steps block
   [PASS] receipts bus: HMAC authenticity, forgery rejected, audit chain
   [PASS] verifier: refute-first default, engine re-check, refuted!=gate
   [PASS] secret hygiene: redaction active, no secrets in artifacts
   [PASS] worker layer: router (default) available
-Result: 12 pass, 1 warn, 0 fail
+Result: 13 pass, 1 warn, 0 fail
 
 $ agent-ultra demo
 [ok] panel: 3 findings, 3 accepted -> Fix the empty-token acceptance before shipping...
@@ -85,6 +86,7 @@ $ agent-ultra demo
 [ok] receipts: genuine authentic, forgery rejected, audit chain ok=True
 [ok] verifier: no-evidence refuted, re-check confirmed (cannot satisfy a gate)
 [ok] ultracode: 4 agents fan out -> COMPLETE -> receipt valid=True -> resume replays 4 cached (0 calls)
+[ok] bob: 10-step pipeline gate passed=True; skipped step blocks=True, fake fan-out blocks=True, doctored panel blocks=True
 DEMO PASSED — the full loop works on this machine.
 
 $ agent-ultra --mock panel "Is this auth service safe?" --lenses security,correctness,failure-modes
@@ -147,6 +149,50 @@ Commands: `ultracode run <workflow>` · `list` · `status` · `resume <run_id>`.
 Bundled workflows: **smoke** (fan-out + pipeline) and **review** (finders →
 skeptic votes → synthesis). Full guide: [docs/ultracode.md](docs/ultracode.md).
 
+## bob — the 10-step enforced build pipeline
+
+**bob** composes the whole kit into one enforced build loop (alias:
+`agent-ultra build`):
+
+```
+SPEC -> RED -> GREEN -> REFACTOR -> CODE-QUALITY -> SECURITY-FANOUT
+     -> WORKFLOW -> ULTRA -> QUIZ -> COMMIT
+```
+
+Every gated step leaves a **hash-chained, HMAC-signed receipt** written from
+real execution — the pytest runner's actual output (RED/GREEN), ultracode's
+checksummed run receipts (the two fan-out steps), the panel's execution
+receipt (ULTRA). The commit gate re-derives what it can (a live pytest
+re-run, file staleness hashes) and cross-checks the rest. You cannot *claim*
+a step ran:
+
+- a **skipped step** blocks (missing receipt + broken chain),
+- a **fabricated fan-out** blocks (no ultracode run receipt backs the claim),
+- a **doctored panel receipt** blocks (its checksum no longer matches),
+- an **edited or hand-authored receipt** blocks (integrity/HMAC fail).
+
+```console
+$ agent-ultra bob run "add a slugify helper" --mock     # offline, no key
+bob run 20260708T154002Z — add a slugify helper  [mock: sample task, no key]
+  [step01_spec] slugify(text) lowercases the input, replaces runs of non-al...
+  [step02_red] RED: 4 failing / 4 collected
+  [step03_green] GREEN: 4 passing
+  [step04_refactor] no edits (hashes re-pinned)
+  [step05_codequality] checklist recorded
+  [step06_security] 4 agents, 4 finding(s)
+  [step07_workflow] 5 agents over 5 dimensions
+  [step08_panel] decision: Fix the empty-token acceptance before shipping...
+  [step09_quiz] outcome=skipped (3 questions)
+
+gate PASSED — receipt chain validates (9 receipts).
+```
+
+Mock mode swaps only the *model content* for a bundled sample task — pytest,
+ultracode, the panel, and the gate all really execute, which is what makes
+the no-key demo honest. Commands: `bob run <task>` · `bob gate`
+(pre-commit chokepoint; `--complete-on-pass` seals the run) · `bob status`.
+Full guide: [docs/bob-the-builder.md](docs/bob-the-builder.md).
+
 ## What's in the box
 
 | module | what it does |
@@ -154,6 +200,7 @@ skeptic votes → synthesis). Full guide: [docs/ultracode.md](docs/ultracode.md)
 | **panel** | Adversarial review: parallel critic *lenses* → steelman → judge cross-exam → synthesis. Verdicts: `real_now` / `real_later` / `theoretical` / `wrong`. Panel agents are roles, not models — one healthy route runs a whole panel. |
 | **ultra_loop** | build → test → panel → classify → fix → re-test → re-panel → **ship gate**. Red tests stop before the panel; low-context panels are refused; only proof-gated work ships. |
 | **ultracode** | Deterministic multi-agent workflows: `META` + `async run(wf)` scripts fan work across bounded agents (`parallel`/`pipeline`) under hard budgets, with a resumable journal, a checksummed receipt, and a terminal-safe status card. Fan-out → journal → resume → receipt → status. |
+| **bob** | The 10-step enforced build pipeline (SPEC→RED→GREEN→…→COMMIT). Each gated step leaves a hash-chained, HMAC-signed receipt from real execution; the commit gate re-runs tests live and cross-checks ultracode/panel receipts. Skipped, faked, or edited steps block. |
 | **broker** | Every model-authored command classified SAFE / ELEVATED / DANGEROUS, ledgered, and executed only if its tier allows. DANGEROUS with no approval path is **denied by default**. |
 | **proof** | "Done" requires recorded evidence. Accepted findings become gates; `assert_shippable()` raises on unsupported completion claims. |
 | **evidence** | Bounded source gathering with secret redaction; low-context detection. |
@@ -248,6 +295,7 @@ Full guide: [docs/adapter-guide.md](docs/adapter-guide.md).
 
 [architecture](docs/architecture.md) · [panel](docs/panel.md) ·
 [ULTRA loop](docs/ultra-loop.md) · [ultracode](docs/ultracode.md) ·
+[bob pipeline](docs/bob-the-builder.md) ·
 [command broker](docs/command-broker.md) ·
 [proof gates](docs/proof-gates.md) · [adapter guide](docs/adapter-guide.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·

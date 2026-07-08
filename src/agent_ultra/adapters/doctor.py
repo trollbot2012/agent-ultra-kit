@@ -253,6 +253,64 @@ def verifier_demo(out_dir: Path):
                 "refuted_verdict": refuted_receipt["verdict"]}
 
 
+def bob_demo(out_dir: Path):
+    """Offline: the full 10-step pipeline passes its gate, then three faked
+    chains block — a skipped step, a fabricated fan-out claim, and a doctored
+    panel receipt. All state is isolated under *out_dir*."""
+    import io
+    from ..bob import run_bob, gate_check
+    from ..bob.pipeline import BobRun
+
+    ws = out_dir / "bob-demo"
+    key = out_dir / "bob-demo.key"
+    uc_home = out_dir / "bob-demo-ultracode"
+    sink = io.StringIO()
+    outcome = run_bob("add a slugify helper", ws, mock=True, key_path=key,
+                      ultracode_home=uc_home, interactive=False, out=sink)
+
+    run = BobRun(workspace=ws, run_dir=ws / ".agent-ultra" / "bob" / "runs"
+                 / outcome.run_id, key=key.read_bytes())
+
+    # 1. a skipped step blocks: remove the workflow receipt
+    wf_receipt = run.receipt_path("step07_workflow")
+    saved = wf_receipt.read_text(encoding="utf-8")
+    wf_receipt.unlink()
+    skipped_blocks = not gate_check(run, allow_mock=True,
+                                    rerun_tests=False).passed
+    wf_receipt.write_text(saved, encoding="utf-8")
+
+    # 2. a fabricated fan-out claim blocks: re-sign step06 naming an invented
+    # ultracode run (valid chain + HMAC, but nothing on disk backs the claim)
+    sec = run.load("step06_security")
+    run.receipt_path("step06_security").unlink()
+    run.write("step06_security",
+              {"ultracode": {"run_id": "20990101T000000-fake-000000",
+                             "home": str(uc_home)},
+               "lenses": ["invented"], "findings": []},
+              writer="engine", mock=True)
+    fake_fanout_blocks = not gate_check(run, allow_mock=True,
+                                        rerun_tests=False).passed
+    run.receipt_path("step06_security").write_text(
+        json.dumps(sec, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # 3. a doctored panel receipt blocks: flip one byte in the panel's own
+    # execution receipt (checksum no longer matches)
+    panel_receipt = run.run_dir / "panel" / "panel_execution_receipt.json"
+    body = json.loads(panel_receipt.read_text(encoding="utf-8"))
+    body["lens_count_executed"] = 99
+    panel_receipt.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    fake_panel_blocks = not gate_check(run, allow_mock=True,
+                                       rerun_tests=False).passed
+
+    ok = (outcome.passed and skipped_blocks and fake_fanout_blocks
+          and fake_panel_blocks)
+    return ok, {"pipeline_passed": outcome.passed,
+                "skipped_step_blocks": skipped_blocks,
+                "fake_fanout_blocks": fake_fanout_blocks,
+                "fake_panel_blocks": fake_panel_blocks,
+                "run_id": outcome.run_id}
+
+
 def run_demo(args) -> int:
     out = Path(tempfile.mkdtemp(prefix="agent-ultra-demo-"))
     print("agent-ultra demo (offline, deterministic mock route)\n")
@@ -277,8 +335,14 @@ def run_demo(args) -> int:
     print(f"[{'ok' if ok6 else 'FAIL'}] ultracode: {uc['calls']} agents fan out "
           f"-> {uc['final_state']} -> receipt valid={uc['receipt_valid']} "
           f"-> resume replays {uc['resume_cached']} cached ({uc['resume_calls']} calls)")
+    ok7, bb = bob_demo(out)
+    print(f"[{'ok' if ok7 else 'FAIL'}] bob: 10-step pipeline gate "
+          f"passed={bb['pipeline_passed']}; skipped step blocks="
+          f"{bb['skipped_step_blocks']}, fake fan-out blocks="
+          f"{bb['fake_fanout_blocks']}, doctored panel blocks="
+          f"{bb['fake_panel_blocks']}")
     print(f"\nartifacts: {out}")
-    all_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
+    all_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
     print("\nDEMO " + ("PASSED — the full loop works on this machine."
                        if all_ok else "FAILED — run `agent-ultra doctor`."))
     return 0 if all_ok else 1
@@ -380,6 +444,15 @@ def run_doctor(args) -> int:
             json.dumps(detail)[:140])
     except Exception as e:
         add(FAIL, "ultracode", str(e)[:160])
+
+    # 7a3. bob: the 10-step pipeline passes its gate; faked chains block
+    try:
+        ok, detail = bob_demo(scratch)
+        add(PASS if ok else FAIL,
+            "bob: 10-step pipeline gate passes; skipped/faked steps block",
+            json.dumps(detail)[:140])
+    except Exception as e:
+        add(FAIL, "bob pipeline", str(e)[:160])
 
     # 7b. receipts bus: authenticity separate from integrity, forgery rejected,
     # gate audit chain intact.

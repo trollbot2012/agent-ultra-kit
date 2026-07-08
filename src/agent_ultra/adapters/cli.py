@@ -287,6 +287,102 @@ def _infer_workflow_for_run(args) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------
+# bob — the 10-step enforced build pipeline
+# --------------------------------------------------------------------------
+
+def _bob_run(args) -> int:
+    from ..bob import run_bob
+    pool = None
+    if not args.mock:
+        pool = _build_pool(args)
+    outcome = run_bob(args.task, args.workspace, mock=args.mock, pool=pool,
+                      interactive=False if args.no_quiz else None,
+                      force=args.force)
+    return 0 if outcome.passed else 1
+
+
+def _bob_gate(args) -> int:
+    from ..bob import BobRun, gate_check
+    run = BobRun.active(args.workspace)
+    if run is None:
+        # non-interference by default; AGENT_ULTRA_REQUIRE_RUN=1 makes the
+        # pipeline mandatory for hook-level commits (mirrors the private
+        # reference's require-run policy).
+        if args.hook and os.environ.get("AGENT_ULTRA_REQUIRE_RUN") == "1":
+            print("BLOCKED: no active bob run and AGENT_ULTRA_REQUIRE_RUN=1 "
+                  "— the pipeline is mandatory; start a run first",
+                  file=sys.stderr)
+            return 1
+        print("no active bob run — nothing to gate (non-interference)")
+        return 0
+    result = gate_check(run, allow_mock=args.allow_mock,
+                        rerun_tests=not args.no_rerun)
+    if result.passed:
+        if args.complete_on_pass:
+            run.complete(result.to_dict())
+        elif args.mark_pass:
+            run.mark_pass(result.to_dict())
+        print(f"gate PASSED for run {run.run_id}")
+        for step, summary in result.checked.items():
+            print(f"  [ok] {step}: {summary}")
+        return 0
+    print(f"gate BLOCKED run {run.run_id} — {len(result.errors)} failure(s):")
+    for e in result.errors:
+        print(f"  ! {e}")
+    return 1
+
+
+def _bob_seal(args) -> int:
+    from ..bob import BobRun
+    run = BobRun.active(args.workspace)
+    if run is None:
+        if args.if_passed:
+            return 0
+        print("no active bob run", file=sys.stderr)
+        return 2
+    if run.seal():
+        print(f"SEALED — run {run.run_id}")
+        return 0
+    if args.if_passed:
+        return 0
+    print(f"NOT SEALED — run {run.run_id} has no recorded gate pass "
+          "(run `agent-ultra bob gate --mark-pass` first)", file=sys.stderr)
+    return 1
+
+
+def _bob_hooks(args) -> int:
+    from ..bob.pipeline import install_hooks
+    try:
+        hook = install_hooks(args.workspace, python=args.python)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"installed: {hook} (+ pre-merge-commit, post-commit)")
+    print("lifecycle: pre-commit validates + marks the pass; post-commit "
+          "seals after the commit lands.")
+    return 0
+
+
+def _bob_status(args) -> int:
+    from ..bob import BobRun, STEPS, GATED_STEPS
+    run = BobRun.active(args.workspace)
+    if run is None:
+        print("no active bob run")
+        return 0
+    print(f"run {run.run_id} — {run.goal()}")
+    have = {r.get('step'): r for r in run.chain()}
+    for step in STEPS:
+        if step == "step10_commit":
+            continue
+        mark = ("done" if step in have
+                else "REQUIRED" if step in GATED_STEPS else "-")
+        print(f"  {step:<20} {mark}")
+    missing = [s for s in GATED_STEPS if s not in have]
+    print(f"\n{'ready for `agent-ultra bob gate`' if not missing else 'missing: ' + ', '.join(missing)}")
+    return 0
+
+
 def _receipts_bus(args):
     from ..receipts_bus import ReceiptsBus
     return ReceiptsBus(db_path=args.db or "", key_path=args.key or "")
@@ -437,6 +533,68 @@ def main(argv=None) -> int:
     ucrs.add_argument("--json", action="store_true")
     _uc_common(ucrs)
     ucrs.set_defaults(func=_ultracode_resume)
+
+    # -- bob: the 10-step enforced build pipeline --------------------------
+    for alias in ("bob", "build"):
+        kwargs = {"help": "10-step enforced build pipeline: every step "
+                          "leaves a receipt; commit/report only when "
+                          "the chain validates (alias: build)"} \
+            if alias == "bob" else {}
+        bp = sub.add_parser(alias, **kwargs)
+        bsub = bp.add_subparsers(dest="bob_cmd", required=True)
+
+        br = bsub.add_parser("run", help="run the whole pipeline on a task")
+        br.add_argument("task")
+        br.add_argument("--workspace", default=".")
+        br.add_argument("--no-quiz", action="store_true",
+                        help="record the quiz step as skipped (non-interactive)")
+        br.add_argument("--force", action="store_true",
+                        help="abandon an existing unproven active run and start fresh")
+        br.add_argument("--mock", action="store_true",
+                        help="offline demo on the bundled sample task (no key)")
+        br.add_argument("--mode", default="single", choices=["single", "mixed"])
+        br.add_argument("--config", default="")
+        br.set_defaults(func=_bob_run)
+
+        bg = bsub.add_parser("gate", help="validate the receipt chain of the "
+                                          "active run (pre-commit chokepoint)")
+        bg.add_argument("--workspace", default=".")
+        bg.add_argument("--allow-mock", action="store_true",
+                        help="accept mock-route receipts (demo runs only)")
+        bg.add_argument("--no-rerun", action="store_true",
+                        help="skip the live pytest re-run (chain checks only)")
+        bg.add_argument("--mark-pass", action="store_true",
+                        help="record gate-pass.json on success, keep ACTIVE "
+                             "(pre-commit hook mode — seal happens post-commit)")
+        bg.add_argument("--complete-on-pass", action="store_true",
+                        help="mark pass AND release ACTIVE on success "
+                             "(manual close outside a commit)")
+        bg.add_argument("--hook", action="store_true",
+                        help="hook mode: honor AGENT_ULTRA_REQUIRE_RUN=1 "
+                             "when no run is active")
+        bg.set_defaults(func=_bob_gate)
+
+        bl = bsub.add_parser("seal", help="release ACTIVE after the commit "
+                                          "landed (post-commit hook; requires "
+                                          "a recorded gate pass)")
+        bl.add_argument("--workspace", default=".")
+        bl.add_argument("--if-passed", action="store_true",
+                        help="exit 0 silently when no run is active or the "
+                             "gate has not passed (hook mode)")
+        bl.set_defaults(func=_bob_seal)
+
+        bh = bsub.add_parser("hook-install",
+                             help="write the pre-commit (gate --mark-pass), "
+                                  "pre-merge-commit, and post-commit (seal) "
+                                  "hooks")
+        bh.add_argument("--workspace", default=".")
+        bh.add_argument("--python", default="",
+                        help="interpreter to bake into the hooks")
+        bh.set_defaults(func=_bob_hooks)
+
+        bs = bsub.add_parser("status", help="show which steps have receipts")
+        bs.add_argument("--workspace", default=".")
+        bs.set_defaults(func=_bob_status)
 
     gp = sub.add_parser("panel-gate",
                         help="block REPORT unless a valid panel execution "
