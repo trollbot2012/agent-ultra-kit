@@ -71,13 +71,20 @@ $ agent-ultra doctor
   [PASS] command broker: safe auto-runs, dangerous denies, ledger written
   [PASS] panel demo: 3 findings, 3 accepted, decision produced
   [PASS] ULTRA demo: build->test->panel->fix loop->proof artifacts
+  [PASS] ultracode: fan-out -> journal -> resume (cached) -> valid receipt
+  [PASS] receipts bus: HMAC authenticity, forgery rejected, audit chain
+  [PASS] verifier: refute-first default, engine re-check, refuted!=gate
   [PASS] secret hygiene: redaction active, no secrets in artifacts
-Result: 8 pass, 1 warn, 0 fail
+  [PASS] worker layer: router (default) available
+Result: 12 pass, 1 warn, 0 fail
 
 $ agent-ultra demo
 [ok] panel: 3 findings, 3 accepted -> Fix the empty-token acceptance before shipping...
 [ok] broker: safe=passed, dangerous=denied (deny-by-default)
 [ok] ultra: tests green -> panel -> 3 fix task(s) -> fix loop -> proof saved
+[ok] receipts: genuine authentic, forgery rejected, audit chain ok=True
+[ok] verifier: no-evidence refuted, re-check confirmed (cannot satisfy a gate)
+[ok] ultracode: 4 agents fan out -> COMPLETE -> receipt valid=True -> resume replays 4 cached (0 calls)
 DEMO PASSED — the full loop works on this machine.
 
 $ agent-ultra --mock panel "Is this auth service safe?" --lenses security,correctness,failure-modes
