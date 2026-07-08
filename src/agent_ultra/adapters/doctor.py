@@ -119,6 +119,29 @@ def panel_demo(out_dir: Path):
     return ok, report
 
 
+def ultracode_demo(out_dir: Path):
+    """Fan-out -> journal -> resume -> receipt, fully offline. Returns
+    (ok, info) where ok also proves the resume replayed with zero calls and
+    the receipt checksum validates."""
+    from ..ultracode import UltracodeEngine, demo_pool, verify_receipt
+    import json as _json
+    home = out_dir / "ultracode-demo"
+    eng = UltracodeEngine(demo_pool(), home=home)
+    rep = eng.run_script(eng.resolve("smoke"))
+    receipt = _json.loads(Path(rep.receipt_path).read_text(encoding="utf-8"))
+    resumed = eng.run_script(eng.resolve("smoke"), resume_run_id=rep.run_id)
+    ok = (rep.final_state == "COMPLETE"
+          and rep.model_calls == 4
+          and verify_receipt(receipt)
+          and resumed.model_calls == 0
+          and resumed.cached_hits == 4)
+    return ok, {"final_state": rep.final_state, "calls": rep.model_calls,
+                "resume_calls": resumed.model_calls,
+                "resume_cached": resumed.cached_hits,
+                "receipt_valid": verify_receipt(receipt),
+                "run_dir": rep.artifact_dir}
+
+
 def broker_demo(out_dir: Path):
     from ..broker.broker import CommandBroker, TRUSTED_OWNER_TIERS
     ledger = out_dir / "broker-demo.jsonl"
@@ -250,8 +273,12 @@ def run_demo(args) -> int:
     print(f"[{'ok' if ok5 else 'FAIL'}] verifier: no-evidence refuted, "
           f"re-check confirmed, refuted verdict={vb['refuted_verdict']} "
           f"(cannot satisfy a gate)")
+    ok6, uc = ultracode_demo(out)
+    print(f"[{'ok' if ok6 else 'FAIL'}] ultracode: {uc['calls']} agents fan out "
+          f"-> {uc['final_state']} -> receipt valid={uc['receipt_valid']} "
+          f"-> resume replays {uc['resume_cached']} cached ({uc['resume_calls']} calls)")
     print(f"\nartifacts: {out}")
-    all_ok = ok1 and ok2 and ok3 and ok4 and ok5
+    all_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
     print("\nDEMO " + ("PASSED — the full loop works on this machine."
                        if all_ok else "FAILED — run `agent-ultra doctor`."))
     return 0 if all_ok else 1
@@ -344,6 +371,15 @@ def run_doctor(args) -> int:
             "ULTRA demo: build->test->panel->fix loop->proof artifacts")
     except Exception as e:
         add(FAIL, "ULTRA demo", str(e)[:160])
+
+    # 7a2. ultracode: multi-agent fan-out -> journal -> resume -> receipt
+    try:
+        ok, detail = ultracode_demo(scratch)
+        add(PASS if ok else FAIL,
+            "ultracode: fan-out -> journal -> resume (cached) -> valid receipt",
+            json.dumps(detail)[:140])
+    except Exception as e:
+        add(FAIL, "ultracode", str(e)[:160])
 
     # 7b. receipts bus: authenticity separate from integrity, forgery rejected,
     # gate audit chain intact.

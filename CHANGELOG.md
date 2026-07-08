@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **ultracode** (`agent_ultra.ultracode`) — deterministic multi-agent workflow
+  engine. Workflows are plain Python modules (`META` + `async def run(wf)`) that
+  fan work across bounded agents via `wf.agent` (one model call, optional
+  JSON-Schema validation with feedback retries), `wf.parallel` (barrier) and
+  `wf.pipeline` (no barrier), under hard `wf.budget` call/token ceilings, with
+  broker-gated `wf.run_check`. Every run writes a typed event stream
+  (`events.jsonl`), a replayable journal, per-agent artifacts, and a checksummed
+  receipt (`verify_receipt`). **Resume** replays completed calls from the
+  journal and spends budget only on new ones (0 calls when unchanged). A
+  terminal-safe status card renders from the journal (plain ASCII unless stdout
+  is a proven interactive UTF terminal; never crashes the run). CLI:
+  `agent-ultra ultracode run|list|status|resume`, with `--mock` for a fully
+  offline, keyless route. Bundled examples: `smoke` and `review`
+  (finders -> skeptic votes -> synthesis). `doctor` and `demo` now cover it; see
+  [docs/ultracode.md](docs/ultracode.md). 14 offline tests.
 - **Receipts bus** (`agent_ultra.receipts_bus`). A unified, authenticated
   receipt index over SQLite (WAL, default auto-checkpoint). Each receipt carries
   two hashes over its canonical body: `receipt_sha256` (integrity) and a keyed
