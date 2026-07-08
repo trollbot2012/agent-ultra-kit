@@ -26,6 +26,10 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+# bob's RED/GREEN steps execute pytest at runtime; the core kit stays
+# dependency-free, so install this extra (or pytest itself) to use bob:
+#   pip install agent-ultra-kit[bob]
+bob = ["pytest>=7"]
 # Optional heavy worker: LangChain Deep Agents as a multi-file builder/fixer.
 # The core install stays zero-dependency; install this extra only if you want
 # the Deep Agents worker:  pip install agent-ultra-kit[deepagents]

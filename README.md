@@ -189,8 +189,11 @@ gate PASSED — receipt chain validates (9 receipts).
 
 Mock mode swaps only the *model content* for a bundled sample task — pytest,
 ultracode, the panel, and the gate all really execute, which is what makes
-the no-key demo honest. Commands: `bob run <task>` · `bob gate`
-(pre-commit chokepoint; `--complete-on-pass` seals the run) · `bob status`.
+the no-key demo honest. bob's one runtime dependency is pytest
+(`pip install pytest`, or `agent-ultra-kit[bob]`); the rest of the kit needs
+nothing. Commands: `bob run <task>` · `bob gate --mark-pass` (pre-commit:
+validates, keeps the run active) · `bob seal` (post-commit: releases it) ·
+`bob hook-install` (writes all three hooks) · `bob status`.
 Full guide: [docs/bob-the-builder.md](docs/bob-the-builder.md).
 
 ## What's in the box

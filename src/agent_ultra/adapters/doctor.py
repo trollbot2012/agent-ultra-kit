@@ -256,10 +256,17 @@ def verifier_demo(out_dir: Path):
 def bob_demo(out_dir: Path):
     """Offline: the full 10-step pipeline passes its gate, then three faked
     chains block — a skipped step, a fabricated fan-out claim, and a doctored
-    panel receipt. All state is isolated under *out_dir*."""
+    panel receipt. All state is isolated under *out_dir*.
+
+    Returns (ok, info); ok is None when pytest is absent (the kit core is
+    dependency-free, so a fresh install may not have it) — callers report
+    that as a WARN with the install hint, not a failure."""
     import io
     from ..bob import run_bob, gate_check
-    from ..bob.pipeline import BobRun
+    from ..bob.pipeline import BobRun, pytest_available, PYTEST_MISSING_MSG
+
+    if not pytest_available():
+        return None, {"skipped": PYTEST_MISSING_MSG}
 
     ws = out_dir / "bob-demo"
     key = out_dir / "bob-demo.key"
@@ -267,6 +274,10 @@ def bob_demo(out_dir: Path):
     sink = io.StringIO()
     outcome = run_bob("add a slugify helper", ws, mock=True, key_path=key,
                       ultracode_home=uc_home, interactive=False, out=sink)
+    if not outcome.passed:
+        return False, {"pipeline_passed": False,
+                       "blocked_at": outcome.blocked_at,
+                       "run_id": outcome.run_id}
 
     run = BobRun(workspace=ws, run_dir=ws / ".agent-ultra" / "bob" / "runs"
                  / outcome.run_id, key=key.read_bytes())
@@ -336,11 +347,17 @@ def run_demo(args) -> int:
           f"-> {uc['final_state']} -> receipt valid={uc['receipt_valid']} "
           f"-> resume replays {uc['resume_cached']} cached ({uc['resume_calls']} calls)")
     ok7, bb = bob_demo(out)
-    print(f"[{'ok' if ok7 else 'FAIL'}] bob: 10-step pipeline gate "
-          f"passed={bb['pipeline_passed']}; skipped step blocks="
-          f"{bb['skipped_step_blocks']}, fake fan-out blocks="
-          f"{bb['fake_fanout_blocks']}, doctored panel blocks="
-          f"{bb['fake_panel_blocks']}")
+    if ok7 is None:
+        print(f"[--] bob: skipped — {bb['skipped']}")
+        ok7 = True    # absence of the optional test runner is not a failure
+    elif ok7:
+        print(f"[ok] bob: 10-step pipeline gate "
+              f"passed={bb['pipeline_passed']}; skipped step blocks="
+              f"{bb['skipped_step_blocks']}, fake fan-out blocks="
+              f"{bb['fake_fanout_blocks']}, doctored panel blocks="
+              f"{bb['fake_panel_blocks']}")
+    else:
+        print(f"[FAIL] bob: {json.dumps(bb)[:160]}")
     print(f"\nartifacts: {out}")
     all_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
     print("\nDEMO " + ("PASSED — the full loop works on this machine."
@@ -445,12 +462,18 @@ def run_doctor(args) -> int:
     except Exception as e:
         add(FAIL, "ultracode", str(e)[:160])
 
-    # 7a3. bob: the 10-step pipeline passes its gate; faked chains block
+    # 7a3. bob: the 10-step pipeline passes its gate; faked chains block.
+    # pytest is bob's only runtime dependency and is optional for the rest
+    # of the kit — absent pytest is a WARN with the install hint, not a FAIL.
     try:
         ok, detail = bob_demo(scratch)
-        add(PASS if ok else FAIL,
-            "bob: 10-step pipeline gate passes; skipped/faked steps block",
-            json.dumps(detail)[:140])
+        if ok is None:
+            add(WARN, "bob: skipped — pytest not installed",
+                "RED/GREEN need it: pip install pytest")
+        else:
+            add(PASS if ok else FAIL,
+                "bob: 10-step pipeline gate passes; skipped/faked steps block",
+                json.dumps(detail)[:140])
     except Exception as e:
         add(FAIL, "bob pipeline", str(e)[:160])
 
