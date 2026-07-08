@@ -283,6 +283,19 @@ class BobRun:
 # system pytest runner (steps 2 and 3)
 # --------------------------------------------------------------------------
 
+def pytest_available() -> bool:
+    """The RED/GREEN steps execute pytest; the kit core is dependency-free,
+    so pytest may be absent on a fresh install. Callers check this to give a
+    clear 'pip install pytest' message instead of a cryptic empty RED."""
+    import importlib.util
+    return importlib.util.find_spec("pytest") is not None
+
+
+PYTEST_MISSING_MSG = ("pytest is not installed in this environment — the "
+                      "RED/GREEN steps need it: pip install pytest "
+                      "(or: pip install 'agent-ultra-kit[dev]')")
+
+
 # -v node lines: "tests/test_x.py::test_a PASSED [ 50%]" and parametrized ids
 # that contain spaces: "test_x.py::test_a[hello world] PASSED [ 50%]". The id
 # is everything up to the status word, which pytest right-pads before the
@@ -321,6 +334,10 @@ def run_pytest_step(run: BobRun, step: str, test_file: str,
     if step not in ("red", "green"):
         raise ValueError("step must be 'red' or 'green'")
     step_name = "step02_red" if step == "red" else "step03_green"
+    if not pytest_available():
+        # write nothing: an honest "cannot run" beats a receipt recording a
+        # spawn failure as if the tests were exercised
+        return False, {}, PYTEST_MISSING_MSG
 
     from ..broker.broker import classify
     shown_cmd = f"{Path(sys.executable).name} -m pytest {test_file} -v"
@@ -609,7 +626,9 @@ def _gate_check(run: BobRun, *, rerun_tests: bool, allow_mock: bool,
         checked["step03_green"] = f"{len(green_ids)} tests passing"
 
     # ---- live re-run (re-derived, never trusted) ---------------------------
-    if rerun_tests and green is not None and test_file:
+    if rerun_tests and green is not None and test_file and not pytest_available():
+        errors.append(f"live re-run: {PYTEST_MISSING_MSG}")
+    elif rerun_tests and green is not None and test_file:
         exit_code, output = _run_pytest(run.workspace, test_file, timeout=600)
         live_ids = set(parse_pytest_nodes(output))
         if exit_code != 0:

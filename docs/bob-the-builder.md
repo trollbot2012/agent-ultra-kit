@@ -35,6 +35,7 @@ cross-check (ultracode receipts, the panel execution receipt).
 ## Quick start (no API key)
 
 ```bash
+pip install pytest      # bob's only runtime dependency (RED/GREEN run it)
 agent-ultra bob run "add a slugify helper" --mock
 ```
 
