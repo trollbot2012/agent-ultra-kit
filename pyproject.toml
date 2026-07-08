@@ -41,6 +41,7 @@ Homepage = "https://github.com/trollbot2012/agent-ultra-kit"
 
 [project.scripts]
 agent-ultra = "agent_ultra.adapters.cli:main"
+agent-ultra-leakgate = "agent_ultra.leakgate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

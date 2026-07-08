@@ -1,0 +1,26 @@
+# Base64-encoded private-string denylist for the leak gate.
+# One base64 token per line; '#' lines and blanks are ignored.
+# The gate decodes these at runtime so this file itself never contains
+# the plaintext tokens (and so does not trip its own scan).
+# To add a token: base64-encode it (UTF-8) and append a line.
+YWxldGhlb24=
+bXl0aG9z
+U09VTA==
+c2staGVybWVz
+QzpcQUlcYnJhaW4=
+V2F4aWxsaWFt
+Z2xtLTUuMg==
+bWltby12Mi41LXBybw==
+ZGVlcHNlZWstdjQtcHJv
+Z2VtaW5pLTMtZmxhc2g=
+a2ltaQ==
+bG9jYWwtZmFzdA==
+dmlzaW9u
+aGVybWVzLWFjdA==
+aGVybWVzLXZlcmlmeQ==
+aGVybWVzLXBsYW4=
+bW5lbWU=
+QmlnIEE=
+QmlnIEQ=
+QXBwRGF0YVxMb2NhbFxoZXJtZXM=
+RG9jdW1lbnRzXEFJLVdvcmtmbG93

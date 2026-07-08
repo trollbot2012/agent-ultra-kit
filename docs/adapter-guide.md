@@ -65,7 +65,7 @@ For the ULTRA loop, provide `builder(workspace, task) -> str` and
 | generic CLI | `adapters.cli` | run panel/ultra/classify from the shell |
 | LiteLLM | `adapters.litellm_routes` | build a pool over a LiteLLM proxy |
 | Docker sandbox | `adapters.docker_sandbox` | `sandbox_argv` for the broker |
-| memory (Mneme-style) | `adapters.mneme_memory` | wire hooks to a memory system |
+| external memory | `adapters.external_memory` | wire hooks to a memory system |
 | Hermes | `adapters.hermes` | env-driven pool + broker for Hermes-style agents |
 | Ktisis | `adapters.ktisis` | env-driven ULTRA loop for Ktisis-style build agents |
 

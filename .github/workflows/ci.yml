@@ -23,3 +23,15 @@ jobs:
       - run: agent-ultra doctor
       - run: agent-ultra demo
       - run: agent-ultra classify "rm -rf build"
+
+  leak-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      # Scan the whole tree plus the head commit message. No whitelist:
+      # a hit fails the build; the fix is to change the offending text.
+      - run: agent-ultra-leakgate . --message "$(git log -1 --pretty=%B)"

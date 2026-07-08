@@ -119,6 +119,29 @@ def panel_demo(out_dir: Path):
     return ok, report
 
 
+def ultracode_demo(out_dir: Path):
+    """Fan-out -> journal -> resume -> receipt, fully offline. Returns
+    (ok, info) where ok also proves the resume replayed with zero calls and
+    the receipt checksum validates."""
+    from ..ultracode import UltracodeEngine, demo_pool, verify_receipt
+    import json as _json
+    home = out_dir / "ultracode-demo"
+    eng = UltracodeEngine(demo_pool(), home=home)
+    rep = eng.run_script(eng.resolve("smoke"))
+    receipt = _json.loads(Path(rep.receipt_path).read_text(encoding="utf-8"))
+    resumed = eng.run_script(eng.resolve("smoke"), resume_run_id=rep.run_id)
+    ok = (rep.final_state == "COMPLETE"
+          and rep.model_calls == 4
+          and verify_receipt(receipt)
+          and resumed.model_calls == 0
+          and resumed.cached_hits == 4)
+    return ok, {"final_state": rep.final_state, "calls": rep.model_calls,
+                "resume_calls": resumed.model_calls,
+                "resume_cached": resumed.cached_hits,
+                "receipt_valid": verify_receipt(receipt),
+                "run_dir": rep.artifact_dir}
+
+
 def broker_demo(out_dir: Path):
     from ..broker.broker import CommandBroker, TRUSTED_OWNER_TIERS
     ledger = out_dir / "broker-demo.jsonl"
@@ -168,6 +191,68 @@ def ultra_demo(out_dir: Path):
     return ok, rep
 
 
+def receipts_demo(out_dir: Path):
+    """Offline: sign a receipt, prove authenticity is separate from integrity,
+    reject a forgery, and verify a hash-chained gate audit."""
+    from ..receipts_bus import ReceiptsBus
+    from ..receipts_bus.envelope import receipt_sha256
+    key = out_dir / "install.key"
+    key.write_bytes(b"agent-ultra-doctor-install-key-0123456789")
+    bus = ReceiptsBus(db_path=out_dir / "receipts.db", key_path=key)
+    good = bus.append(kind="panel", actor="engine_a", verdict="shipped",
+                      session_id="demo")
+    gv = bus.verify(good["receipt_id"])
+    # a hand-authored envelope with a valid sha256 but no HMAC is a forgery
+    forged = dict(good)
+    forged["receipt_id"] = "forged-0001"
+    forged["receipt_hmac"] = ""
+    forged["receipt_sha256"] = receipt_sha256(forged)
+    bus.put(forged)
+    fv = bus.verify("forged-0001")
+    bus.append_audit("ship", "enforce", "allow", "engine_a", "demo evidence")
+    bus.append_audit("ship", "enforce", "block", "reviewer", "demo stale")
+    chain = bus.verify_audit("ship")
+    ok = (gv["ok"] and gv["authentic"]
+          and fv["integrity"] and not fv["authentic"] and not fv["ok"]
+          and chain["ok"])
+    return ok, {"genuine_ok": gv["ok"],
+                "forgery_authentic": fv["authentic"],
+                "audit_chain_ok": chain["ok"]}
+
+
+def verifier_demo(out_dir: Path):
+    """Offline: refute-first defaults, engine re-check via an injected runner,
+    and a REFUTED verdict producing a non-acceptable receipt."""
+    from ..verifier import verify_claim
+    from ..receipts_bus import ReceiptsBus, Candidate
+    key = out_dir / "verifier.key"
+    key.write_bytes(b"agent-ultra-doctor-verifier-key-0123456789")
+    bus = ReceiptsBus(db_path=out_dir / "verifier.db", key_path=key)
+
+    def emit(fields):
+        return bus.append(**fields)["receipt_id"]
+
+    def run_check(cmd, cwd):
+        return {"exit_code": 0, "ledger_ref": "demo://1"}
+
+    no_evidence = verify_claim("it works")           # -> refuted (default)
+    confirmed = verify_claim("tests pass", declared_verify_cmd="pytest -q",
+                             run_check=run_check, session_id="demo",
+                             emit_receipt=emit)
+    refuted = verify_claim("bogus", session_id="demo", emit_receipt=emit)
+    refuted_receipt = bus.get(refuted["receipt_id"])
+    # the refuted receipt must NOT satisfy a gate for its own claim
+    ok_bind, clause = bus.binds(
+        {"session_id": "demo", "claim_sha256": refuted["claim_sha256"]},
+        Candidate(receipt=refuted_receipt))
+    ok = (no_evidence["refuted"] and not confirmed["refuted"]
+          and refuted["refuted"] and refuted_receipt["verdict"] == "failed"
+          and not ok_bind)
+    return ok, {"no_evidence_refuted": no_evidence["refuted"],
+                "recheck_confirmed": not confirmed["refuted"],
+                "refuted_verdict": refuted_receipt["verdict"]}
+
+
 def run_demo(args) -> int:
     out = Path(tempfile.mkdtemp(prefix="agent-ultra-demo-"))
     print("agent-ultra demo (offline, deterministic mock route)\n")
@@ -180,8 +265,20 @@ def run_demo(args) -> int:
     ok3, rep = ultra_demo(out)
     print(f"[{'ok' if ok3 else 'FAIL'}] ultra: tests green -> panel -> "
           f"{len(rep.fix_tasks)} fix task(s) -> fix loop -> proof saved")
+    ok4, rb = receipts_demo(out)
+    print(f"[{'ok' if ok4 else 'FAIL'}] receipts: genuine authentic, "
+          f"forgery rejected (authentic={rb['forgery_authentic']}), "
+          f"audit chain ok={rb['audit_chain_ok']}")
+    ok5, vb = verifier_demo(out)
+    print(f"[{'ok' if ok5 else 'FAIL'}] verifier: no-evidence refuted, "
+          f"re-check confirmed, refuted verdict={vb['refuted_verdict']} "
+          f"(cannot satisfy a gate)")
+    ok6, uc = ultracode_demo(out)
+    print(f"[{'ok' if ok6 else 'FAIL'}] ultracode: {uc['calls']} agents fan out "
+          f"-> {uc['final_state']} -> receipt valid={uc['receipt_valid']} "
+          f"-> resume replays {uc['resume_cached']} cached ({uc['resume_calls']} calls)")
     print(f"\nartifacts: {out}")
-    all_ok = ok1 and ok2 and ok3
+    all_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
     print("\nDEMO " + ("PASSED — the full loop works on this machine."
                        if all_ok else "FAILED — run `agent-ultra doctor`."))
     return 0 if all_ok else 1
@@ -274,6 +371,35 @@ def run_doctor(args) -> int:
             "ULTRA demo: build->test->panel->fix loop->proof artifacts")
     except Exception as e:
         add(FAIL, "ULTRA demo", str(e)[:160])
+
+    # 7a2. ultracode: multi-agent fan-out -> journal -> resume -> receipt
+    try:
+        ok, detail = ultracode_demo(scratch)
+        add(PASS if ok else FAIL,
+            "ultracode: fan-out -> journal -> resume (cached) -> valid receipt",
+            json.dumps(detail)[:140])
+    except Exception as e:
+        add(FAIL, "ultracode", str(e)[:160])
+
+    # 7b. receipts bus: authenticity separate from integrity, forgery rejected,
+    # gate audit chain intact.
+    try:
+        ok, detail = receipts_demo(scratch)
+        add(PASS if ok else FAIL,
+            "receipts bus: HMAC authenticity, forgery rejected, audit chain",
+            json.dumps(detail)[:120])
+    except Exception as e:
+        add(FAIL, "receipts bus", str(e)[:160])
+
+    # 7c. verifier: refute-first default, engine re-check, non-acceptable
+    # verdict on refutation.
+    try:
+        ok, detail = verifier_demo(scratch)
+        add(PASS if ok else FAIL,
+            "verifier: refute-first default, engine re-check, refuted!=gate",
+            json.dumps(detail)[:120])
+    except Exception as e:
+        add(FAIL, "verifier", str(e)[:160])
 
     # 8. secret hygiene: redaction works, and nothing the demos wrote leaks
     try:

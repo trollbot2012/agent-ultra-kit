@@ -25,3 +25,17 @@ from .routes.mock import MockChatClient, demo_panel_client  # noqa: F401
 from .ultra_loop.loop import UltraLoop, UltraReport  # noqa: F401
 from .proof.gates import ProofGate, GateSet, ProofError  # noqa: F401
 from .memory.hooks import MemoryHooks, CompositeHooks, JsonlHooks  # noqa: F401
+from .receipts_bus import (  # noqa: F401
+    ReceiptsBus,
+    BusUnavailable,
+    Candidate,
+    build_envelope,
+    EnvelopeError,
+)
+from .verifier import (  # noqa: F401
+    verify_claim,
+    Verifier,
+    VerifierResult,
+    EscalationBudget,
+    BudgetExceeded,
+)

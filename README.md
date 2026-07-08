@@ -106,12 +106,47 @@ agent-ultra doctor --live             # probe the endpoint
 agent-ultra panel "Is this change production-safe?" --evidence-dir ./src
 ```
 
+## ultracode — deterministic multi-agent workflows
+
+Where the panel debates one question, **ultracode** runs a *script* that fans
+work across many bounded agents and proves what happened. A workflow is a plain
+Python module — `META` + `async def run(wf)` — using `wf.agent` (one model
+call, optionally schema-validated), `wf.parallel` (barrier), `wf.pipeline` (no
+barrier), `wf.budget` (hard call/token ceilings), and `wf.run_check`
+(broker-gated host commands). Every run writes a replayable **journal** and a
+checksummed **receipt**; a terminal status card renders from the journal, so a
+model's own text can never fake progress.
+
+```console
+$ agent-ultra ultracode run smoke --mock      # offline, no API key
+ULTRACODE
+Run: 20260707T201444-smoke-18eb5f
+Name: smoke
+Phase: Chain
+Agents: 4/4 complete
+Failed: 0
+Blocked: 0
+Progress: [####]
+Status: COMPLETE
+Result: {"pings": ["pong-one", "pong-two"], "chained": [...], "calls_spent": 4}
+Resume: agent-ultra ultracode resume 20260707T201444-smoke-18eb5f
+
+$ agent-ultra ultracode resume 20260707T201444-smoke-18eb5f --mock
+Status: COMPLETE
+Result: {..., "calls_spent": 0}          # every call replayed from the journal
+```
+
+Commands: `ultracode run <workflow>` · `list` · `status` · `resume <run_id>`.
+Bundled workflows: **smoke** (fan-out + pipeline) and **review** (finders →
+skeptic votes → synthesis). Full guide: [docs/ultracode.md](docs/ultracode.md).
+
 ## What's in the box
 
 | module | what it does |
 |--------|--------------|
 | **panel** | Adversarial review: parallel critic *lenses* → steelman → judge cross-exam → synthesis. Verdicts: `real_now` / `real_later` / `theoretical` / `wrong`. Panel agents are roles, not models — one healthy route runs a whole panel. |
 | **ultra_loop** | build → test → panel → classify → fix → re-test → re-panel → **ship gate**. Red tests stop before the panel; low-context panels are refused; only proof-gated work ships. |
+| **ultracode** | Deterministic multi-agent workflows: `META` + `async run(wf)` scripts fan work across bounded agents (`parallel`/`pipeline`) under hard budgets, with a resumable journal, a checksummed receipt, and a terminal-safe status card. Fan-out → journal → resume → receipt → status. |
 | **broker** | Every model-authored command classified SAFE / ELEVATED / DANGEROUS, ledgered, and executed only if its tier allows. DANGEROUS with no approval path is **denied by default**. |
 | **proof** | "Done" requires recorded evidence. Accepted findings become gates; `assert_shippable()` raises on unsupported completion claims. |
 | **evidence** | Bounded source gathering with secret redaction; low-context detection. |
@@ -119,8 +154,8 @@ agent-ultra panel "Is this change production-safe?" --evidence-dir ./src
 | **artifacts** | Uniform JSON + Markdown run records and JSONL ledgers for every run. |
 | **memory** | Five generic write-back hooks (`on_panel_decision`, `on_finding_accepted`, `on_command_run`, `on_task_complete`, `on_lesson_learned`). No memory system required. |
 
-Adapters (all optional): generic CLI, LiteLLM, Docker sandbox, memory
-(Mneme-style), Hermes-style and Ktisis-style runtimes.
+Adapters (all optional): generic CLI, LiteLLM, Docker sandbox, external
+memory, Hermes-style and Ktisis-style runtimes.
 
 ### Workers: router (default) vs Deep Agents (optional)
 
@@ -205,7 +240,8 @@ Full guide: [docs/adapter-guide.md](docs/adapter-guide.md).
 ## Docs
 
 [architecture](docs/architecture.md) · [panel](docs/panel.md) ·
-[ULTRA loop](docs/ultra-loop.md) · [command broker](docs/command-broker.md) ·
+[ULTRA loop](docs/ultra-loop.md) · [ultracode](docs/ultracode.md) ·
+[command broker](docs/command-broker.md) ·
 [proof gates](docs/proof-gates.md) · [adapter guide](docs/adapter-guide.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
 [releasing](docs/releasing.md) · [INSTALL](INSTALL.md) ·

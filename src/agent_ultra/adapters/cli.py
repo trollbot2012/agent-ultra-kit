@@ -169,6 +169,180 @@ def _panel_gate(args) -> int:
     return 0 if allowed else 1
 
 
+# --------------------------------------------------------------------------
+# ultracode — deterministic multi-agent workflow engine
+# --------------------------------------------------------------------------
+
+def _ultracode_engine(args):
+    from ..ultracode import UltracodeEngine, demo_pool
+    if getattr(args, "mock", False):
+        pool = demo_pool()
+    else:
+        pool = _build_pool(args)
+    routes = getattr(pool, "routes", None) or ["mock-a"]
+    try:
+        usage_source = pool.client_for(routes[0])
+    except Exception:
+        usage_source = None
+    cfg = {}
+    if getattr(args, "max_calls", 0):
+        cfg["max_calls"] = args.max_calls
+    if getattr(args, "token_budget", 0):
+        cfg["token_budget"] = args.token_budget
+    return UltracodeEngine(pool, config=cfg, usage_source=usage_source)
+
+
+def _ultracode_run(args) -> int:
+    from ..ultracode import WorkflowError, summarize_events, render_card, print_card
+    eng = _ultracode_engine(args)
+    wf_args = None
+    if getattr(args, "args", ""):
+        try:
+            wf_args = json.loads(args.args)
+        except ValueError:
+            wf_args = args.args  # bare text is a valid wf.args
+    try:
+        path = eng.resolve(args.workflow)
+        rep = eng.run_script(path, args=wf_args,
+                             resume_run_id=getattr(args, "resume", "") or "")
+    except WorkflowError as e:
+        print(f"ultracode error: {e}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        from dataclasses import asdict
+        print(json.dumps(asdict(rep), indent=2, default=str, ensure_ascii=False))
+        return 0 if rep.status == "completed" else 1
+    print_card(summarize_events(rep.events_path))
+    if rep.result is not None:
+        print("Result: " + json.dumps(rep.result, default=str, ensure_ascii=False)[:600])
+    print("Report: " + rep.artifact_json)
+    print("Resume: agent-ultra ultracode resume " + rep.run_id)
+    return 0 if rep.status == "completed" else 1
+
+
+def _ultracode_list(args) -> int:
+    eng = _ultracode_engine(args)
+    listing = eng.list_scripts()
+    if listing["saved"]:
+        print(f"saved ({eng.scripts_dir()}):")
+        for s in listing["saved"]:
+            print(f"  {s['name']:<20} {s['description']}")
+    else:
+        print(f"no saved workflows yet — drop .py files into {eng.scripts_dir()}")
+    print("bundled examples:")
+    for s in listing["examples"]:
+        print(f"  {s['name']:<20} {s['description']}")
+    return 0
+
+
+def _ultracode_status(args) -> int:
+    from ..ultracode import summarize_events, render_card
+    eng = _ultracode_engine(args)
+    runs = eng.home / "runs"
+    files = sorted(runs.glob(".status-*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True) \
+        if runs.exists() else []
+    cards = []
+    for f in files:
+        try:
+            st = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        events = st.get("events_path") or str(runs / st.get("run_id", "?") / "events.jsonl")
+        summary = summarize_events(events)
+        if not summary.get("ok"):
+            summary = {"run_id": st.get("run_id"), "name": st.get("name"),
+                       "phase": st.get("phase"), "counts": st.get("counts") or {},
+                       "dots": []}
+        cards.append(render_card(summary, rich=False))
+    if not cards:
+        print("No ultracode run is currently in progress.")
+        return 0
+    print("\n\n".join(cards))
+    return 0
+
+
+def _ultracode_resume(args) -> int:
+    args.workflow = args.workflow_hint or _infer_workflow_for_run(args)
+    if not args.workflow:
+        print("could not infer which workflow produced run "
+              f"{args.run_id!r}; pass it: "
+              "agent-ultra ultracode resume <run_id> <workflow>", file=sys.stderr)
+        return 2
+    args.resume = args.run_id
+    return _ultracode_run(args)
+
+
+def _infer_workflow_for_run(args) -> str:
+    """Read the run's journal run_start entry to recover the script path."""
+    eng = _ultracode_engine(args)
+    journal = eng.home / "runs" / args.run_id / "journal.jsonl"
+    try:
+        for line in journal.read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            if entry.get("type") == "run_start" and entry.get("script"):
+                return entry["script"]
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def _receipts_bus(args):
+    from ..receipts_bus import ReceiptsBus
+    return ReceiptsBus(db_path=args.db or "", key_path=args.key or "")
+
+
+def _receipts(args) -> int:
+    bus = _receipts_bus(args)
+    sub = args.receipts_cmd
+    if sub == "list":
+        rows = bus.list(session_id=args.session or "", workspace=args.workspace or "")
+        for r in rows:
+            print(f"  {r['receipt_id'][:12]} {r['kind']:<12} {r['verdict']:<10} "
+                  f"{r.get('ts', '')}")
+        print(f"\n{len(rows)} receipt(s)")
+        return 0
+    if sub == "show":
+        r = bus.get(args.receipt_id)
+        if r is None:
+            print("not found", file=sys.stderr)
+            return 1
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0
+    if sub == "verify":
+        res = bus.verify(args.receipt_id)
+        print(f"ok={res['ok']} authentic={res['authentic']} "
+              f"integrity={res['integrity']} refs_ok={res['refs_ok']}")
+        return 0 if res["ok"] else 1
+    if sub == "why":
+        ctx = {"session_id": args.session or "", "workspace": args.workspace or "",
+               "claim_sha256": args.claim_sha or "",
+               "verify_command": args.verify_command or ""}
+        if args.cited:
+            ctx["cited"] = args.cited
+        out = bus.why(ctx)
+        for c in out["candidates"]:
+            mark = "BINDS" if c["binds"] else "     "
+            print(f"  [{mark}] {c['receipt_id'][:12] if c['receipt_id'] else '?':<12} "
+                  f"{c['kind']:<12} {c['clause']} ({c['origin']})")
+        print(f"\nclaim {'BINDS' if out['binds'] else 'is UNSUPPORTED'}")
+        return 0 if out["binds"] else 1
+    if sub == "attest":
+        if not sys.stdin.isatty():
+            print("attest is interactive-only; refusing in non-interactive mode",
+                  file=sys.stderr)
+            return 2
+        note = input("attestation note: ").strip()
+        env = bus.append(kind="manual", actor="operator", verdict="approved",
+                         session_id=args.session or "",
+                         workspace=args.workspace or "",
+                         evidence=[{"type": "note", "value": note}])
+        print(f"wrote manual receipt {env['receipt_id']} "
+              f"(manual receipts never satisfy a completion gate)")
+        return 0
+    return 2
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="agent-ultra",
                                 description="adversarial panel / ULTRA loop / broker")
@@ -216,11 +390,78 @@ def main(argv=None) -> int:
     cp.add_argument("command")
     cp.set_defaults(func=_classify)
 
+    # -- ultracode: deterministic multi-agent workflows -------------------
+    ucp = sub.add_parser("ultracode",
+                         help="run deterministic multi-agent workflows "
+                              "(fan-out -> journal -> resume -> receipt)")
+    ucsub = ucp.add_subparsers(dest="ultracode_cmd", required=True)
+
+    def _uc_common(sp):
+        # accept --mock/--mode/--config after the subcommand too, so the
+        # friend-facing `agent-ultra ultracode run X --mock` form just works
+        # (argparse otherwise requires global flags before the subcommand).
+        sp.add_argument("--mock", action="store_true",
+                        help="use the offline deterministic mock route (no key)")
+        sp.add_argument("--mode", default="single", choices=["single", "mixed"])
+        sp.add_argument("--config", default="")
+
+    ucr = ucsub.add_parser("run", help="run a workflow by name or path")
+    ucr.add_argument("workflow", help="saved name, bundled example, or a .py path")
+    ucr.add_argument("--args", default="",
+                     help="JSON (or bare text) passed to the workflow as wf.args")
+    ucr.add_argument("--resume", default="",
+                     help="run_id of a prior run to replay cached calls from")
+    ucr.add_argument("--max-calls", type=int, default=0, dest="max_calls")
+    ucr.add_argument("--token-budget", type=int, default=0, dest="token_budget")
+    ucr.add_argument("--json", action="store_true")
+    _uc_common(ucr)
+    ucr.set_defaults(func=_ultracode_run)
+
+    ucl = ucsub.add_parser("list", help="list saved + bundled workflows")
+    _uc_common(ucl)
+    ucl.set_defaults(func=_ultracode_list)
+
+    ucs = ucsub.add_parser("status", help="show in-progress runs (terminal-safe)")
+    _uc_common(ucs)
+    ucs.set_defaults(func=_ultracode_status)
+
+    ucrs = ucsub.add_parser("resume", help="resume a prior run by run_id "
+                                           "(replays cached calls)")
+    ucrs.add_argument("run_id")
+    ucrs.add_argument("workflow_hint", nargs="?", default="",
+                      help="the workflow name/path (inferred from the journal "
+                           "if omitted)")
+    ucrs.add_argument("--args", default="")
+    ucrs.add_argument("--max-calls", type=int, default=0, dest="max_calls")
+    ucrs.add_argument("--token-budget", type=int, default=0, dest="token_budget")
+    ucrs.add_argument("--json", action="store_true")
+    _uc_common(ucrs)
+    ucrs.set_defaults(func=_ultracode_resume)
+
     gp = sub.add_parser("panel-gate",
                         help="block REPORT unless a valid panel execution "
                              "receipt proves real panel-agent calls happened")
     gp.add_argument("run_dir", help="ULTRA run dir (has panel_execution_receipt.json)")
     gp.set_defaults(func=_panel_gate)
+
+    rp = sub.add_parser("receipts",
+                        help="list/show/verify/why/attest authenticated receipts")
+    rp.add_argument("--db", default="", help="receipts store path (default in-memory)")
+    rp.add_argument("--key", default="", help="per-install HMAC key file path")
+    rp.add_argument("--session", default="")
+    rp.add_argument("--workspace", default="")
+    rsub = rp.add_subparsers(dest="receipts_cmd", required=True)
+    rsub.add_parser("list", help="list stored receipts")
+    rs_show = rsub.add_parser("show", help="print one receipt as JSON")
+    rs_show.add_argument("receipt_id")
+    rs_ver = rsub.add_parser("verify", help="check integrity + authenticity")
+    rs_ver.add_argument("receipt_id")
+    rs_why = rsub.add_parser("why", help="explain which receipts bind a claim")
+    rs_why.add_argument("--claim-sha", dest="claim_sha", default="")
+    rs_why.add_argument("--verify-command", dest="verify_command", default="")
+    rs_why.add_argument("--cited", default="")
+    rsub.add_parser("attest", help="write a manual receipt (interactive only)")
+    rp.set_defaults(func=_receipts)
 
     from .doctor import run_doctor, run_init, run_demo
 
