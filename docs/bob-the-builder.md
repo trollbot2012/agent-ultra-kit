@@ -166,6 +166,48 @@ which reads git's staged list. Install both: `assert_bob_done` guards
 completion claims, the pre-commit hook guards the commit itself and catches
 any staged file that no receipt covers.
 
+## The surgical lane (inert edits only)
+
+Typo-class doc/config edits do not need RED/GREEN and a five-agent sweep.
+The surgical lane is the sanctioned lightweight tier — and it NARROWS Bob,
+it never replaces it:
+
+```bash
+# edit the files first, then:
+agent-ultra bob surgical "fix readme wording" --files README.md
+agent-ultra bob surgical "fix readme wording" --files README.md --mock   # offline demo
+```
+
+The lane runs a real two-lens review fan-out (accuracy + safety, ultracode-
+backed and fingerprint-pinned exactly like steps 6/7), an operator quiz
+(`passed` requires your captured answer; an unanswered quiz is honestly
+`skipped`), and its own gate.
+
+Entry criteria are objective and validated at start — anything else raises
+and the answer is the full pipeline:
+
+- **Inert types only.** Prose (`.md`/`.rst`/`.txt`/...) and known-inert
+  dotfiles auto-qualify. Structured config (yaml/json/toml/ini/cfg) is
+  dual-use: it needs the operator's explicit
+  `AGENT_ULTRA_SURGICAL_ALLOW_CONFIG=1` AND must clear the denylist.
+- **The denylist is executable-by-context files** — CI workflows, git-hook
+  managers, task runners, package manifests, tool configs (matched by name,
+  path, and shape) — regardless of extension. A doc ABOUT Dockerfiles is a
+  doc; a `Dockerfile` is not.
+- **Declared files are the exact scope.** The gate rejects any staged file
+  that was not declared, is not inert, or is denied; `scope-add` on a
+  surgical run refuses risky paths.
+- **A small diff budget** (100 lines / 256 KiB, binary edits rejected),
+  fail-closed on any git error.
+
+**Mode downgrade cannot launder code (C1).** `run.json`'s mode field is a
+REQUEST the gate verifies, never a trusted assertion: `bob gate` routes to
+the surgical gate ONLY when the actual staged set independently qualifies
+(all inert, none denied, all declared). Flip a run's mode to "surgical"
+with code staged and you get the FULL gate — which demands the full receipt
+chain that run never produced. A full-mode run never auto-downgrades
+either, even when only inert files are staged: surgical is opt-in at start.
+
 ## Trust boundary (read this)
 
 bob resists the failure modes an agent actually falls into: **skipping** the

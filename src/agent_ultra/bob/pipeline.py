@@ -42,8 +42,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .receipts import (
-    STEPS, GATED_STEPS, BobReceiptError,
+    STEPS, GATED_STEPS, SURGICAL_GATED_STEPS, BobReceiptError,
     build_step_receipt, load_receipt, validate_chain, utc_now,
+)
+from .surgical import (
+    surgical_ext_allowed, surgical_file_denied, staged_set_qualifies,
+    diff_budget_error,
 )
 
 # staged files never produced by the build itself
@@ -178,7 +182,9 @@ class BobRun:
               key_path: str | Path | None = None,
               force: bool = False,
               scope: "list | None" = None,
-              operator_unbounded: bool = False) -> "BobRun":
+              operator_unbounded: bool = False,
+              mode: str = "full",
+              surgical_files: "list | None" = None) -> "BobRun":
         """Open a run. Refuses (ValueError) if another run is already ACTIVE
         and unproven — starting over would silently orphan it and release it
         from enforcement. Pass ``force=True`` to abandon it deliberately.
@@ -196,6 +202,33 @@ class BobRun:
         reach it. It is loudly announced and durably logged, and it never
         covers the git hooks or bob's own machinery."""
         workspace = Path(workspace)
+        if mode not in ("full", "surgical"):
+            raise ValueError(f"unknown bob mode: {mode!r}")
+        if mode == "surgical":
+            # the surgical lane is for INERT edits only — objective entry
+            # criteria validated up front; anything else is full-pipeline
+            # work. Its scope IS its declared files, exactly.
+            if operator_unbounded:
+                raise ValueError(
+                    "operator_unbounded is NEVER valid for surgical mode — "
+                    "a surgical run's scope is exactly its declared inert "
+                    "files")
+            if not surgical_files:
+                raise ValueError(
+                    "surgical_files is required for surgical mode — "
+                    "declare the files you intend to edit")
+            for f in surgical_files:
+                if surgical_file_denied(f):
+                    raise ValueError(
+                        f"surgical mode denied_path {f!r} — this file can "
+                        "execute in CI/build/install contexts; run the "
+                        "full pipeline")
+                if not surgical_ext_allowed(f):
+                    raise ValueError(
+                        f"surgical mode rejects code file {f!r} — only "
+                        "non-executable text types qualify; run the full "
+                        "pipeline")
+            scope = list(surgical_files)
         scope = [_norm_scope_entry(s) for s in (scope or []) if str(s).strip()]
         for s in scope:
             if scope_entry_is_infra(s):
@@ -236,8 +269,11 @@ class BobRun:
         run_dir.mkdir(parents=True)
         meta = {
             "run_id": run_dir.name, "goal": goal, "started_utc": utc_now(),
-            "scope": scope,
+            "scope": scope, "mode": mode,
         }
+        if mode == "surgical":
+            meta["surgical_files"] = [_norm_scope_entry(f)
+                                      for f in surgical_files]
         if operator_unbounded:
             meta["operator_unbounded"] = True
         (run_dir / "run.json").write_text(json.dumps(
@@ -351,6 +387,15 @@ class BobRun:
         trust ceiling as the rest of the run metadata."""
         return bool(self._meta().get("operator_unbounded"))
 
+    def mode(self) -> str:
+        """Run mode from run.json; absent field = full (backward compat).
+        run.json is plaintext, so the mode is a REQUEST the gate verifies
+        (see gate_check's C1 dispatch), never a trusted assertion."""
+        return str(self._meta().get("mode") or "full")
+
+    def surgical_files(self) -> list:
+        return list(self._meta().get("surgical_files") or [])
+
     def add_scope(self, paths) -> "tuple[list, list]":
         """Expand the run's scope — the approved, validated, logged
         mechanism. Rejects infrastructure paths always. Appends to run.json
@@ -358,6 +403,7 @@ class BobRun:
         (added, errors)."""
         meta = self._meta()
         cur = list(meta.get("scope") or [])
+        surgical = str(meta.get("mode") or "full") == "surgical"
         added, errors = [], []
         for raw in paths or []:
             e = _norm_scope_entry(raw)
@@ -366,6 +412,12 @@ class BobRun:
             if scope_entry_is_infra(e):
                 errors.append(f"{e}: enforcement infrastructure — never a "
                               "run target")
+                continue
+            if surgical and (surgical_file_denied(e)
+                             or not surgical_ext_allowed(e)):
+                errors.append(f"{e}: not an inert/allowed type — a surgical "
+                              "run cannot expand into risky paths (use the "
+                              "full pipeline)")
                 continue
             if e not in cur:
                 cur.append(e)
@@ -746,6 +798,22 @@ def gate_check(run: BobRun, *, rerun_tests: bool = True,
     receipts themselves must still hold).
     """
     try:
+        # ---- mode dispatch (C1: mode-downgrade defense) --------------------
+        # run.json's mode field is a REQUEST the gate verifies, never a
+        # trusted assertion. The commit is routed to the surgical gate ONLY
+        # when the run asks for it AND the actual staged set independently
+        # qualifies (all inert, none denied, all declared). Flipping a
+        # run's mode to "surgical" with code staged therefore routes it to
+        # the FULL gate — which demands the full receipt chain and blocks.
+        if run.mode() == "surgical" and not run.marker_orphaned():
+            routed = staged_files
+            if routed is None and _inside_work_tree(Path(run.workspace)):
+                routed = _staged_files(Path(run.workspace))
+            if routed is not None and staged_set_qualifies(
+                    routed, run.surgical_files()):
+                return surgical_gate_check(run, allow_mock=allow_mock,
+                                           staged_files=routed)
+            # falls through: the staged set does not qualify -> FULL gate
         return _gate_check(run, rerun_tests=rerun_tests, allow_mock=allow_mock,
                            staged_files=staged_files,
                            allow_uncovered=allow_uncovered)
@@ -753,6 +821,137 @@ def gate_check(run: BobRun, *, rerun_tests: bool = True,
         return GateResult(passed=False,
                           errors=[f"gate error (fail-closed): "
                                   f"{type(e).__name__}: {e}"])
+
+
+def surgical_gate_check(run: BobRun, *, allow_mock: bool = False,
+                        staged_files=None) -> GateResult:
+    """The surgical lane's gate — fail-closed throughout, and NARROWER than
+    full mode on every axis it covers: declared-file allowlist, inert types
+    only, a denylist, and a small diff budget. It can never loosen the full
+    gate: gate_check routes here only when the staged set independently
+    qualifies; everything else gets the full 10-step demands."""
+    try:
+        return _surgical_gate_check(run, allow_mock=allow_mock,
+                                    staged_files=staged_files)
+    except Exception as e:
+        return GateResult(passed=False,
+                          errors=[f"surgical gate error (fail-closed): "
+                                  f"{type(e).__name__}: {e}"])
+
+
+def _surgical_gate_check(run: BobRun, *, allow_mock: bool,
+                         staged_files) -> GateResult:
+    errors: list[str] = []
+    checked: dict = {}
+
+    if run.marker_orphaned():
+        return GateResult(passed=False, errors=[
+            f"run {run.run_id}: ACTIVE marker names a run directory that no "
+            "longer exists — the run was deleted while unproven (fail closed)"])
+
+    declared = run.surgical_files()
+    if not declared:
+        errors.append("surgical: no surgical_files declared in run.json — "
+                      "fail closed")
+    for f in declared:
+        if surgical_file_denied(f) or not surgical_ext_allowed(f):
+            errors.append(f"surgical: declared file {f} is not an inert/"
+                          "allowed type — use the full pipeline")
+
+    # chain spine: same signed/hash-chained demands as full mode
+    chain = run.chain()
+    errors.extend(validate_chain(chain, run.key or None))
+    checked["chain"] = f"{len(chain)} receipt(s), hash-chained + signed"
+
+    have = {r.get("step") for r in chain}
+    for step in SURGICAL_GATED_STEPS:
+        if step not in have:
+            errors.append(f"{step}: receipt missing — the step never ran "
+                          "(or its receipt was deleted)")
+
+    def _ev(rec) -> dict:
+        ev = rec.get("evidence") if isinstance(rec, dict) else None
+        return ev if isinstance(ev, dict) else {}
+
+    # ---- review: cross-checked against the ultracode run it names --------
+    review = run.load("step_surgical_review")
+    if review is not None:
+        ev = _ev(review)
+        rerrs = check_ultracode_evidence(
+            ev, allow_mock=allow_mock, receipt_mock=bool(review.get("mock")),
+            expect_workflow="bob-surgical-review")
+        errors.extend(f"step_surgical_review: {e}" for e in rerrs)
+        checked["step_surgical_review"] = ("ultracode run verified"
+                                           if not rerrs else "INVALID")
+
+    # ---- quiz: passed requires the captured operator response ------------
+    quiz = run.load("step_surgical_quiz")
+    if quiz is not None:
+        ev = _ev(quiz)
+        if (e := _mock_flag_error(quiz, "step_surgical_quiz", allow_mock)):
+            errors.append(e)
+        outcome = ev.get("outcome")
+        if outcome not in ("passed", "skipped"):
+            errors.append(f"step_surgical_quiz: outcome {outcome!r} is not "
+                          "passed/skipped")
+        if not ev.get("questions"):
+            errors.append("step_surgical_quiz: no comprehension questions "
+                          "recorded")
+        if outcome == "passed" and not str(
+                ev.get("operator_response", "") or "").strip():
+            errors.append("step_surgical_quiz: outcome 'passed' without a "
+                          "captured operator response — a quiz nobody "
+                          "answered (self-graded quizzes do not count)")
+        checked["step_surgical_quiz"] = f"outcome={outcome}"
+
+    # ---- staleness: covered files must match disk -------------------------
+    coverage: dict = {}
+    for rec in chain:
+        coverage.update(rec.get("files") or {})
+    for rel, expected in sorted(coverage.items()):
+        f = Path(run.workspace) / rel
+        if not f.is_file():
+            errors.append(f"stale: {rel} covered by a receipt but no longer "
+                          "exists")
+        elif sha256_file(f) != expected:
+            errors.append(f"stale: {rel} changed after its last covering "
+                          "receipt — re-run the review")
+    checked["staleness"] = f"{len(coverage)} file(s) covered"
+
+    # ---- staged set: declared + inert only, fail-closed --------------------
+    if staged_files is None:
+        if _inside_work_tree(Path(run.workspace)):
+            staged_files = _staged_files(Path(run.workspace))
+            if staged_files is None:
+                errors.append("surgical: could not read the staged list "
+                              "(git error) — fail closed")
+                staged_files = []
+        else:
+            staged_files = []
+    declared_norm = {os.path.normpath(str(d)).replace("\\", "/").lower()
+                     for d in declared}
+    for rel in staged_files:
+        norm = os.path.normpath(str(rel)).replace("\\", "/").lower()
+        if norm.startswith(".agent-ultra/"):
+            continue                     # run machinery rides along
+        if surgical_file_denied(rel):
+            errors.append(f"surgical: staged denied_path {rel} — this file "
+                          "executes; use the full pipeline")
+        elif not surgical_ext_allowed(rel):
+            errors.append(f"surgical: staged {rel} is not an inert type — "
+                          "the surgical lane is docs/config only")
+        elif norm not in declared_norm:
+            errors.append(f"surgical: staged {rel} was not declared in "
+                          "surgical_files")
+
+    # ---- diff budget: small edits only, fail-closed -------------------------
+    if _inside_work_tree(Path(run.workspace)):
+        if (berr := diff_budget_error(Path(run.workspace))):
+            errors.append(berr)
+        checked["diff_budget"] = "within budget" if not any(
+            "budget" in e or "BINARY" in e for e in errors) else "EXCEEDED"
+
+    return GateResult(passed=not errors, errors=errors, checked=checked)
 
 
 def _mock_flag_error(rec: dict, step: str, allow_mock: bool) -> "str | None":

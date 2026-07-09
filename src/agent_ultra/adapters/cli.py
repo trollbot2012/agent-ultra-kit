@@ -366,6 +366,17 @@ def _bob_scope_add(args) -> int:
     return 1 if errors else 0
 
 
+def _bob_surgical(args) -> int:
+    from ..bob import run_surgical
+    pool = None
+    if not args.mock:
+        pool = _build_pool(args)
+    outcome = run_surgical(args.task, args.workspace, args.files,
+                           mock=args.mock, pool=pool,
+                           interactive=not args.no_quiz)
+    return 0 if outcome.passed else 1
+
+
 def _bob_abandon(args) -> int:
     from ..bob import BobRun
     if not args.operator_abandon:
@@ -653,6 +664,25 @@ def main(argv=None) -> int:
                          help="why the run is abandoned")
         bab.add_argument("--workspace", default=".")
         bab.set_defaults(func=_bob_abandon)
+
+        bsg = bsub.add_parser(
+            "surgical",
+            help="lightweight lane for INERT doc/config edits: review "
+                 "fan-out + operator quiz + gate. Code never qualifies — "
+                 "it routes to the full pipeline")
+        bsg.add_argument("task")
+        bsg.add_argument("--files", nargs="+", required=True,
+                         help="the inert files this run may edit (its "
+                              "exact scope)")
+        bsg.add_argument("--workspace", default=".")
+        bsg.add_argument("--mock", action="store_true",
+                         help="offline demo (no key)")
+        bsg.add_argument("--no-quiz", action="store_true",
+                         help="record the quiz as skipped (non-interactive)")
+        bsg.add_argument("--mode", default="single",
+                         choices=["single", "mixed"])
+        bsg.add_argument("--config", default="")
+        bsg.set_defaults(func=_bob_surgical)
 
     gp = sub.add_parser("panel-gate",
                         help="block REPORT unless a valid panel execution "

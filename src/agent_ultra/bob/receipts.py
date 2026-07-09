@@ -31,12 +31,18 @@ STEPS = (
     "step01_spec", "step02_red", "step03_green", "step04_refactor",
     "step05_codequality", "step06_security", "step07_workflow",
     "step08_panel", "step09_quiz", "step10_commit",
+    # surgical lane (lightweight tier for INERT doc/config edits — never a
+    # substitute for the full pipeline; code always routes to full)
+    "step_surgical_review", "step_surgical_quiz",
 )
 
 # Steps the gate demands a receipt for. 1/4/5 are judgment steps where a
 # mechanical gate would fake enforcement; 10's record is gate-pass.json itself.
 GATED_STEPS = ("step02_red", "step03_green", "step06_security",
                "step07_workflow", "step08_panel", "step09_quiz")
+
+# the surgical lane's own (narrower, harder) receipt demands
+SURGICAL_GATED_STEPS = ("step_surgical_review", "step_surgical_quiz")
 
 WRITERS = frozenset({"system", "engine", "agent"})
 

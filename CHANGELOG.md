@@ -25,6 +25,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `agent-ultra bob hook-install` to regenerate the hooks.**
 
 ### Added
+- **bob surgical lane** (`agent-ultra bob surgical "<task>" --files ...`,
+  `run_surgical` from Python) — the sanctioned lightweight tier for INERT
+  doc/config edits: a real two-lens review fan-out (ultracode-backed,
+  fingerprint-pinned like steps 6/7) + an operator quiz (`passed` requires
+  the captured answer) + its own fail-closed gate. Entry criteria are
+  objective and validated at start: inert types only (prose + known-inert
+  dotfiles; structured config needs the operator's explicit
+  `AGENT_ULTRA_SURGICAL_ALLOW_CONFIG=1`), a deny list of
+  executable-by-context files (CI workflows, hook managers, task runners,
+  package manifests, tool configs — by name, path, and shape), declared
+  files as the exact scope, and a 100-line/256-KiB text-only diff budget.
+  **Surgical narrows Bob, it never replaces it (C1):** `run.json`'s mode is
+  a request the gate verifies — the surgical gate is used only when the
+  actual staged set independently qualifies; code staged under a
+  "surgical" run routes to the FULL gate and its full receipt-chain
+  demands, and a full-mode run never auto-downgrades.
+
 - **bob run lifecycle + fan-out integrity hardening.** A run can no longer
   be dropped quietly, and fan-out proof got stricter:
   - *No silent orphaning.* `BobRun.start(force=True)` (CLI:

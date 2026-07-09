@@ -13,15 +13,16 @@ cross-checks the rest — a skipped, faked, or edited step blocks.
 """
 
 from .receipts import (
-    STEPS, GATED_STEPS, BobReceiptError,
+    STEPS, GATED_STEPS, SURGICAL_GATED_STEPS, BobReceiptError,
     build_step_receipt, load_receipt, validate_chain,
 )
 from .pipeline import (
     BobRun, BobProofError, GateResult,
     gate_check, run_pytest_step, assert_bob_done, load_or_create_key,
     install_hooks, scope_contains, scope_entry_is_infra,
+    surgical_gate_check,
 )
-from .runner import run_bob, BobOutcome
+from .runner import run_bob, run_surgical, BobOutcome
 
 __all__ = [
     "STEPS", "GATED_STEPS", "BobReceiptError",
@@ -29,5 +30,6 @@ __all__ = [
     "BobRun", "BobProofError", "GateResult",
     "gate_check", "run_pytest_step", "assert_bob_done", "load_or_create_key",
     "install_hooks", "scope_contains", "scope_entry_is_infra",
+    "surgical_gate_check", "SURGICAL_GATED_STEPS", "run_surgical",
     "run_bob", "BobOutcome",
 ]
