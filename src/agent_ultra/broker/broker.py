@@ -91,6 +91,11 @@ _DANGEROUS_RES = [
      "destructive system/registry op"),
     (re.compile(r"(?i)\bstripe\b|\bbilling\b|\bcharge\b|\bpurchase\b"),
      "may spend money"),
+    # bob's operator-only escape flags (abandon an unproven run /
+    # force-supersede one / start unbounded). Operator decisions,
+    # never an agent's -- an agent-driven shell must not auto-run them.
+    (re.compile(r"(?i)--operator-(abandon|force|unbounded)"),
+     "operator-only pipeline escape flag"),
 ]
 
 # -- ELEVATED: normal local dev with side effects ---------------------------

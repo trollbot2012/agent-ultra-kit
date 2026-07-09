@@ -98,6 +98,49 @@ def safe_rel(workspace: Path, name: str) -> str:
     return rel.as_posix()
 
 
+def _norm_scope_entry(s: str) -> str:
+    """Normalize a scope entry to a forward-slash, workspace-relative path
+    with no leading ./ (a trailing / marks a directory)."""
+    r = str(s).strip().replace("\\", "/")
+    while r.startswith("./"):
+        r = r[2:]
+    return r
+
+
+def scope_entry_is_infra(entry: str) -> bool:
+    """True when a scope entry names enforcement infrastructure — the git
+    hooks or bob's own receipt/marker machinery. Such paths are never a
+    legitimate run target: a run must not be able to declare authority over
+    the thing that enforces it."""
+    segs = _norm_scope_entry(entry).lower().rstrip("/").split("/")
+    if ".agent-ultra" in segs:
+        return True
+    if ".git" in segs:
+        i = segs.index(".git")
+        return i + 1 >= len(segs) or segs[i + 1] == "hooks"
+    return False
+
+
+def scope_contains(scope, target_rel: str) -> bool:
+    """True when *target_rel* (workspace-relative) falls inside *scope* —
+    an exact file, anything under a declared directory, or an fnmatch glob.
+    Case-folded with .lower() on purpose: os.path.normcase would flip / to
+    \\ on Windows and break the forward-slash prefix checks."""
+    t = _norm_scope_entry(target_rel).lower()
+    for raw in scope or []:
+        e = _norm_scope_entry(raw).lower()
+        if not e:
+            continue
+        ed = e.rstrip("/")
+        if t == ed:
+            return True
+        if t.startswith(ed + "/"):
+            return True
+        if fnmatch.fnmatch(t, e) or fnmatch.fnmatch(t, ed):
+            return True
+    return False
+
+
 def ultracode_receipt_fingerprint(home, run_id: str) -> str:
     """The sha256 of an ultracode run's receipt.json FILE BYTES, or '' when it
     does not exist. Recorded into the (signed) bob receipt so the gate can
@@ -133,18 +176,57 @@ class BobRun:
     @classmethod
     def start(cls, workspace: str | Path, goal: str = "",
               key_path: str | Path | None = None,
-              force: bool = False) -> "BobRun":
+              force: bool = False,
+              scope: "list | None" = None,
+              operator_unbounded: bool = False) -> "BobRun":
         """Open a run. Refuses (ValueError) if another run is already ACTIVE
         and unproven — starting over would silently orphan it and release it
-        from enforcement. Pass ``force=True`` to abandon it deliberately."""
+        from enforcement. Pass ``force=True`` to abandon it deliberately.
+
+        ``scope`` — the files/dirs/globs this run is FOR — is MANDATORY: the
+        gate rejects staged files outside the declared scope, so a run
+        opened for module A cannot smuggle in edits to module B. A run with
+        no declared scope fails closed (start refuses; a scope stripped from
+        run.json later blocks every staged file at the gate). Expand a live
+        run's scope only through ``add_scope`` (validated + logged).
+
+        ``operator_unbounded=True`` is the explicit, operator-only escape:
+        no scope binding for this run. It is a Python-API parameter on
+        purpose — no CLI verb exposes it, so an agent driving the CLI cannot
+        reach it. It is loudly announced and durably logged, and it never
+        covers the git hooks or bob's own machinery."""
         workspace = Path(workspace)
-        marker = cls._root(workspace) / "ACTIVE"
-        if marker.is_file() and not force:
-            prev = marker.read_text(encoding="utf-8").strip()
+        scope = [_norm_scope_entry(s) for s in (scope or []) if str(s).strip()]
+        for s in scope:
+            if scope_entry_is_infra(s):
+                raise ValueError(
+                    f"scope {s!r} names enforcement infrastructure "
+                    "(.git/hooks or .agent-ultra) — never a run target")
+        if operator_unbounded and scope:
             raise ValueError(
-                f"a bob run ({prev}) is already active and unproven in this "
-                "workspace — finish it (`agent-ultra bob gate`) or pass "
-                "force=True to abandon it. Starting over would orphan it.")
+                "operator_unbounded cannot be combined with a declared "
+                "scope — declare the files OR the operator escape, not both")
+        if not scope and not operator_unbounded:
+            raise ValueError(
+                "a bob run must declare its target scope (the files/dirs "
+                "this run is for) — no-scope runs fail closed; expand later "
+                "with add_scope if the work legitimately grows")
+        marker = cls._root(workspace) / "ACTIVE"
+        if marker.is_file():
+            if not force:
+                prev = marker.read_text(encoding="utf-8").strip()
+                raise ValueError(
+                    f"a bob run ({prev}) is already active and unproven in "
+                    "this workspace — finish it (`agent-ultra bob gate`) or "
+                    "have the operator abandon it explicitly (`agent-ultra "
+                    "bob abandon --operator-abandon`, logged). A run cannot "
+                    "be dropped by starting another.")
+            # force=True is the OPERATOR escape (CLI: --operator-force; the
+            # command broker classifies operator flags as dangerous, so an
+            # agent-driven shell cannot auto-run them). Never silent: the
+            # abandonment is durably logged.
+            cls.abandon(workspace, operator=True,
+                        reason="superseded via start(force=True)")
         stamp = utc_stamp()
         run_dir = cls._root(workspace) / "runs" / stamp
         n = 0
@@ -152,10 +234,30 @@ class BobRun:
             n += 1
             run_dir = cls._root(workspace) / "runs" / f"{stamp}-{n}"
         run_dir.mkdir(parents=True)
-        (run_dir / "run.json").write_text(json.dumps({
+        meta = {
             "run_id": run_dir.name, "goal": goal, "started_utc": utc_now(),
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
+            "scope": scope,
+        }
+        if operator_unbounded:
+            meta["operator_unbounded"] = True
+        (run_dir / "run.json").write_text(json.dumps(
+            meta, indent=2, ensure_ascii=False), encoding="utf-8")
         marker.write_text(run_dir.name, encoding="utf-8")
+        if operator_unbounded:
+            try:
+                with open(run_dir / "scope-log.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "ts": utc_now(), "operator_unbounded": True,
+                        "note": "UNBOUNDED run opened via the operator "
+                                "escape — no scope binding for this run",
+                    }) + "\n")
+            except OSError:
+                pass
+            print("!!! bob: OPERATOR-UNBOUNDED run — no scope binding; the "
+                  "gate will not reject out-of-scope staged files for this "
+                  "run (hooks/.agent-ultra stay off limits). Logged.",
+                  file=sys.stderr)
         return cls(workspace=workspace, run_dir=run_dir,
                    key=load_or_create_key(key_path))
 
@@ -181,17 +283,105 @@ class BobRun:
     def marker_orphaned(self) -> bool:
         return not self.run_dir.is_dir()
 
+    @classmethod
+    def abandon(cls, workspace: str | Path, *, operator: bool = False,
+                reason: str = "") -> "str | None":
+        """OPERATOR-ONLY: release the ACTIVE marker of an unproven run,
+        leaving a durable abandonment record. This is the only sanctioned
+        way to drop a run without proving it — start() refuses to orphan,
+        and the command broker classifies the CLI's operator flags as
+        dangerous so an agent-driven shell cannot auto-run them. Returns
+        the abandoned run id, or None when no run is active. Works on an
+        orphaned marker too (releases it, still on the record)."""
+        if not operator:
+            raise ValueError(
+                "abandon requires the explicit operator flag — an agent "
+                "cannot abandon an unproven run")
+        workspace = Path(workspace)
+        marker = cls._root(workspace) / "ACTIVE"
+        if not marker.is_file():
+            return None
+        name = marker.read_text(encoding="utf-8").strip()
+        rec = {"ts": utc_now(), "run_id": name, "reason": reason,
+               "operator_abandon": True}
+        try:
+            with open(cls._root(workspace) / "abandoned.jsonl", "a",
+                      encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except OSError:
+            pass
+        run_dir = cls._root(workspace) / "runs" / name
+        if run_dir.is_dir():
+            try:
+                (run_dir / "abandoned.json").write_text(
+                    json.dumps(rec, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+        marker.unlink()
+        print(f"!!! bob: run {name} ABANDONED by operator (unproven; "
+              "logged to .agent-ultra/bob/abandoned.jsonl)",
+              file=sys.stderr)
+        return name
+
     @property
     def run_id(self) -> str:
         return self.run_dir.name
 
-    def goal(self) -> str:
+    def _meta(self) -> dict:
         try:
             meta = json.loads((self.run_dir / "run.json").read_text(
                 encoding="utf-8"))
-            return str(meta.get("goal", ""))
+            return meta if isinstance(meta, dict) else {}
         except (OSError, ValueError):
-            return ""
+            return {}
+
+    def goal(self) -> str:
+        return str(self._meta().get("goal", ""))
+
+    def scope(self) -> list:
+        """The run's declared target scope. Scope is mandatory: an empty
+        scope authorizes NOTHING at the gate (fail closed) unless the run
+        was opened with the explicit operator_unbounded escape."""
+        return list(self._meta().get("scope") or [])
+
+    def unbounded(self) -> bool:
+        """True only for a run opened via the explicit, operator-only
+        operator_unbounded escape. run.json is plaintext, so this flag is
+        tamper-EVIDENT (loudly logged at start), not tamper-proof — same
+        trust ceiling as the rest of the run metadata."""
+        return bool(self._meta().get("operator_unbounded"))
+
+    def add_scope(self, paths) -> "tuple[list, list]":
+        """Expand the run's scope — the approved, validated, logged
+        mechanism. Rejects infrastructure paths always. Appends to run.json
+        and records each expansion in scope-log.jsonl. Returns
+        (added, errors)."""
+        meta = self._meta()
+        cur = list(meta.get("scope") or [])
+        added, errors = [], []
+        for raw in paths or []:
+            e = _norm_scope_entry(raw)
+            if not e:
+                continue
+            if scope_entry_is_infra(e):
+                errors.append(f"{e}: enforcement infrastructure — never a "
+                              "run target")
+                continue
+            if e not in cur:
+                cur.append(e)
+                added.append(e)
+        if added:
+            meta["scope"] = cur
+            (self.run_dir / "run.json").write_text(json.dumps(
+                meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                with open(self.run_dir / "scope-log.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": utc_now(),
+                                         "added": added}) + "\n")
+            except OSError:
+                pass
+        return added, errors
 
     def receipt_path(self, step: str) -> Path:
         if step not in STEPS:
@@ -395,6 +585,21 @@ def _as_int(value) -> int:
         return 0
 
 
+def cloned_fanout_error(run_id: str, done_agents) -> "str | None":
+    """A fan-out of N agents that all produced the SAME output is one
+    review wearing N hats — the per-agent output_sha256 in the ultracode
+    receipt exposes the clone. Only the all-identical case is flagged
+    (>=2 agents, one distinct digest): a single coincidental pair of short
+    verdicts stays legal, a copy-pasted sweep does not."""
+    digests = {str(a.get("output_sha256") or "") for a in done_agents
+               if isinstance(a, dict) and a.get("output_sha256")}
+    if len(done_agents) >= 2 and len(digests) == 1:
+        return (f"ultracode run {run_id!r}: all {len(done_agents)} agents "
+                "produced IDENTICAL output — a cloned fan-out is one "
+                "review, not an independent sweep")
+    return None
+
+
 def check_ultracode_evidence(evidence: dict, *, allow_mock: bool,
                              receipt_mock: bool,
                              expect_workflow: str = "") -> list[str]:
@@ -457,6 +662,13 @@ def check_ultracode_evidence(evidence: dict, *, allow_mock: bool,
     if not done:
         errors.append(f"ultracode run {run_id!r} completed 0 agents — "
                       "an empty fan-out proves nothing")
+    # the offline mock route answers every agent identically by design, so
+    # the cloned-fanout check would always trip in demo mode; mock receipts
+    # are only acceptable under --allow-mock anyway, which is the boundary
+    # that already scopes what a demo may prove
+    if not (receipt_mock and allow_mock):
+        if (err := cloned_fanout_error(run_id, done)):
+            errors.append(err)
     if _as_int(rec.get("model_calls")) + _as_int(rec.get("cached_hits")) <= 0:
         errors.append(f"ultracode run {run_id!r} made 0 model calls")
     if receipt_mock and not allow_mock:
@@ -717,6 +929,31 @@ def _gate_check(run: BobRun, *, rerun_tests: bool, allow_mock: bool,
             continue
         errors.append(f"uncovered: staged file {rel} appears in no receipt — "
                       "it was never tested or fanned out for scrutiny")
+
+    # ---- staged files must be WITHIN the run's declared scope ------------------
+    # A run opened for module A must not authorize commits touching module B.
+    # Scope is mandatory: no scope + not the operator escape = every staged
+    # file blocks (fail closed) and the missing declaration is itself an
+    # error. Bob's own machinery (.agent-ultra receipts) is always exempt.
+    scope = run.scope()
+    if run.unbounded():
+        checked["scope"] = "OPERATOR-UNBOUNDED (no scope binding — logged)"
+    else:
+        if not scope:
+            errors.append(
+                "scope: run declares no target scope — scope is mandatory "
+                "and a no-scope run authorizes nothing (fail closed)")
+        for rel in staged_files:
+            if rel.startswith(".agent-ultra/") or rel == ".gitignore":
+                continue
+            if scope and scope_contains(scope, rel):
+                continue
+            errors.append(
+                f"out-of-scope: staged file {rel} is outside the run's "
+                "declared scope — if this edit is really part of the run, "
+                "expand the scope explicitly (`agent-ultra bob scope-add`)")
+        checked["scope"] = (f"{len(scope)} declared entr"
+                            + ("y" if len(scope) == 1 else "ies"))
 
     return GateResult(passed=not errors, errors=errors, checked=checked)
 

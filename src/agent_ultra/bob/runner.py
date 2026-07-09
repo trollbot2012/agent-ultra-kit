@@ -131,8 +131,38 @@ def run_bob(task: str, workspace: str | Path, *, mock: bool = False,
     if interactive is None:
         interactive = (not mock) and sys.stdin.isatty()
 
+    # ---- content generation happens BEFORE the run opens, because the run
+    # must declare its target scope at start (the files this run is FOR).
+    # The gate then rejects any staged file outside that scope, so a run
+    # opened for one module cannot smuggle in edits to another.
+    spec = sample.SAMPLE_SPEC if mock else _gen_spec(pool, task)
+    if not spec:
+        _say(out, "cannot start: no spec produced")
+        return BobOutcome(run_id="", passed=False, blocked_at="step01_spec")
+    if mock:
+        test_file, tests, impl_file, stub = (sample.TEST_FILE,
+                                             sample.SAMPLE_TESTS,
+                                             sample.IMPL_FILE,
+                                             sample.SAMPLE_STUB)
+    else:
+        gen = _gen_files(pool, task, spec)
+        if gen is None:
+            _say(out, "cannot start: model produced no usable tests")
+            return BobOutcome(run_id="", passed=False, blocked_at="step02_red")
+        test_file, tests, impl_file, stub = gen
+    # model-authored file names are untrusted: they must land INSIDE the
+    # workspace (no absolute paths, no `..` traversal). This mirrors the rest
+    # of the kit's "model output is untrusted input" stance.
     try:
-        run = BobRun.start(workspace, goal=task, key_path=key_path, force=force)
+        test_file = safe_rel(workspace, test_file)
+        impl_file = safe_rel(workspace, impl_file)
+    except ValueError as e:
+        _say(out, f"cannot start: unsafe model-authored path: {e}")
+        return BobOutcome(run_id="", passed=False, blocked_at="step02_red")
+
+    try:
+        run = BobRun.start(workspace, goal=task, key_path=key_path,
+                           force=force, scope=[test_file, impl_file])
     except ValueError as e:
         _say(out, f"cannot start: {e}")
         return BobOutcome(run_id="", passed=False, blocked_at="start")
@@ -153,32 +183,11 @@ def run_bob(task: str, workspace: str | Path, *, mock: bool = False,
               + ("  [mock: sample task, no key]" if mock else ""))
 
     # ---- 1. SPEC -----------------------------------------------------------
-    spec = sample.SAMPLE_SPEC if mock else _gen_spec(pool, task)
-    if not spec:
-        return blocked("step01_spec", "no spec produced")
     run.write("step01_spec", {"goal": task, "spec": spec}, writer="agent",
               mock=mock)
     record("step01_spec", spec[:70] + ("..." if len(spec) > 70 else ""))
 
     # ---- 2. RED -------------------------------------------------------------
-    if mock:
-        test_file, tests, impl_file, stub = (sample.TEST_FILE,
-                                             sample.SAMPLE_TESTS,
-                                             sample.IMPL_FILE,
-                                             sample.SAMPLE_STUB)
-    else:
-        gen = _gen_files(pool, task, spec)
-        if gen is None:
-            return blocked("step02_red", "model produced no usable tests")
-        test_file, tests, impl_file, stub = gen
-    # model-authored file names are untrusted: they must land INSIDE the
-    # workspace (no absolute paths, no `..` traversal). This mirrors the rest
-    # of the kit's "model output is untrusted input" stance.
-    try:
-        test_file = safe_rel(workspace, test_file)
-        impl_file = safe_rel(workspace, impl_file)
-    except ValueError as e:
-        return blocked("step02_red", f"unsafe model-authored path: {e}")
     for rel, content in ((test_file, tests), (impl_file, stub)):
         p = workspace / rel
         p.parent.mkdir(parents=True, exist_ok=True)

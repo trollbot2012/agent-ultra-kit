@@ -18,6 +18,7 @@ from agent_ultra.bob import (
 )
 from agent_ultra.bob.pipeline import (
     check_ultracode_evidence, safe_rel, parse_pytest_nodes,
+    scope_contains, scope_entry_is_infra,
 )
 
 KEY = b"bob-test-key-0123456789abcdef"
@@ -82,7 +83,8 @@ def test_removed_middle_receipt_breaks_linkage():
 def test_red_rejects_passing_tests(tmp_path):
     (tmp_path / "test_t.py").write_text("def test_a():\n    assert True\n",
                                         encoding="utf-8")
-    run = BobRun.start(tmp_path, goal="g", key_path=tmp_path / "k.key")
+    run = BobRun.start(tmp_path, goal="g", key_path=tmp_path / "k.key",
+                       scope=["test_t.py"])
     ok, rec, msg = run_pytest_step(run, "red", "test_t.py")
     assert not ok and rec["writer"] == "system"
     assert rec["evidence"]["requirement_met"] is False
@@ -91,7 +93,8 @@ def test_red_rejects_passing_tests(tmp_path):
 def test_red_rejects_collection_errors(tmp_path):
     (tmp_path / "test_t.py").write_text("import missing_module_xyz\n",
                                         encoding="utf-8")
-    run = BobRun.start(tmp_path, goal="g", key_path=tmp_path / "k.key")
+    run = BobRun.start(tmp_path, goal="g", key_path=tmp_path / "k.key",
+                       scope=["test_t.py"])
     ok, _rec, msg = run_pytest_step(run, "red", "test_t.py")
     assert not ok
 
@@ -221,7 +224,7 @@ def test_live_rerun_catches_broken_tests(world_copy):
 
 def test_assert_bob_done_raises_while_unproven(tmp_path):
     run = BobRun.start(tmp_path / "ws", goal="g",
-                       key_path=tmp_path / "k.key")
+                       key_path=tmp_path / "k.key", scope=["x.py"])
     with pytest.raises(BobProofError):
         assert_bob_done(tmp_path / "ws", key_path=tmp_path / "k.key")
     assert run.run_id  # started, never proven
@@ -273,9 +276,15 @@ def test_edited_ultracode_receipt_breaks_fingerprint(bob_world, world_copy):
     base, _ = bob_world
     uc = world_copy.load("step06_security")["evidence"]["ultracode"]
     rec_path = (base / "uc" / "runs" / uc["run_id"] / "receipt.json")
-    rec_path.write_text(rec_path.read_text(encoding="utf-8") + "\n",
-                        encoding="utf-8")   # one byte changes the file sha
-    result = gate_check(world_copy, allow_mock=True, rerun_tests=False)
+    original = rec_path.read_text(encoding="utf-8")
+    # the ultracode home is SHARED module state — restore it afterwards so
+    # later tests see the untampered world
+    try:
+        rec_path.write_text(original + "\n",
+                            encoding="utf-8")  # one byte changes the file sha
+        result = gate_check(world_copy, allow_mock=True, rerun_tests=False)
+    finally:
+        rec_path.write_text(original, encoding="utf-8")
     assert not result.passed
     assert any("fingerprint" in e for e in result.errors)
 
@@ -324,17 +333,22 @@ def test_deleting_run_dir_blocks_via_orphaned_marker(bob_world, tmp_path):
 
 
 def test_start_refuses_to_orphan_an_active_run(tmp_path):
-    BobRun.start(tmp_path / "ws", goal="first", key_path=tmp_path / "k.key")
+    BobRun.start(tmp_path / "ws", goal="first", key_path=tmp_path / "k.key",
+                 scope=["a.py"])
     try:
-        BobRun.start(tmp_path / "ws", goal="second", key_path=tmp_path / "k.key")
+        BobRun.start(tmp_path / "ws", goal="second",
+                     key_path=tmp_path / "k.key", scope=["a.py"])
     except ValueError:
         pass
     else:
         raise AssertionError("second start should refuse while one is active")
-    # force= abandons it deliberately
-    r2 = BobRun.start(tmp_path / "ws", goal="second",
+    # force= is the operator escape — it abandons WITH a durable record
+    r2 = BobRun.start(tmp_path / "ws", goal="second", scope=["a.py"],
                       key_path=tmp_path / "k.key", force=True)
     assert r2.run_id
+    log = (tmp_path / "ws" / ".agent-ultra" / "bob"
+           / "abandoned.jsonl").read_text(encoding="utf-8")
+    assert "operator_abandon" in log      # never silent
 
 
 def test_mock_panel_receipt_blocked_without_allow_mock(world_copy):
@@ -361,7 +375,8 @@ def _git(ws, *args, env=None):
 
 
 def test_mark_pass_keeps_active_and_seal_releases(tmp_path):
-    run = BobRun.start(tmp_path / "ws", goal="g", key_path=tmp_path / "k.key")
+    run = BobRun.start(tmp_path / "ws", goal="g", key_path=tmp_path / "k.key",
+                       scope=["a.py"])
     marker = tmp_path / "ws" / ".agent-ultra" / "bob" / "ACTIVE"
     # seal without a recorded pass must refuse
     assert run.seal() is False
@@ -422,3 +437,161 @@ def test_commit_deadlock_lifecycle(tmp_path, monkeypatch):
     p3 = _git(ws, "commit", "-m", "operator commit (no policy)",
               env={"AGENT_ULTRA_HOME": str(home)})
     assert p3.returncode == 0
+
+
+# --------------------------------------------------------------------------
+# run scope: a run opened for module A cannot authorize commits to module B
+# --------------------------------------------------------------------------
+
+def test_scope_start_without_scope_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="must declare its target scope"):
+        BobRun.start(tmp_path / "ws", goal="g", key_path=tmp_path / "k.key")
+    assert BobRun.active(tmp_path / "ws") is None    # nothing half-started
+
+
+def test_scope_infrastructure_entries_rejected(tmp_path):
+    for bad in (".git/hooks/pre-commit", ".agent-ultra/bob/ACTIVE",
+                "sub/.git/hooks", ".agent-ultra"):
+        with pytest.raises(ValueError, match="enforcement infrastructure"):
+            BobRun.start(tmp_path / "ws", goal="g",
+                         key_path=tmp_path / "k.key", scope=[bad])
+    assert scope_entry_is_infra(".git/hooks/pre-commit")
+    assert scope_entry_is_infra(".agent-ultra/bob/runs")
+    assert not scope_entry_is_infra("src/app.py")
+
+
+def test_scope_matching():
+    assert scope_contains(["mods/a"], "mods/a/impl.py")
+    assert scope_contains(["src/app.py"], "src/app.py")
+    assert scope_contains(["src/*.py"], "src/main.py")
+    assert not scope_contains(["mods/a"], "mods/ab/x.py")   # not a prefix
+    assert not scope_contains(["mods/a"], "mods/b/x.py")
+    assert not scope_contains([], "anything.py")            # empty = nothing
+
+
+def test_scope_staged_file_outside_scope_blocks_gate(world_copy):
+    """The passing world's run was scoped to its test+impl files; a staged
+    file elsewhere must block even though every receipt is intact."""
+    res = gate_check(world_copy, rerun_tests=False, allow_mock=True,
+                     staged_files=["unrelated/other.py"])
+    assert not res.passed
+    assert any("out-of-scope" in e for e in res.errors)
+
+
+def test_scope_staged_in_scope_files_pass(world_copy):
+    scope = world_copy.scope()
+    assert scope, "run_bob must declare the generated files as scope"
+    res = gate_check(world_copy, rerun_tests=False, allow_mock=True,
+                     staged_files=list(scope))
+    assert res.passed, res.errors
+
+
+def test_scope_add_is_validated_and_logged(world_copy):
+    res = gate_check(world_copy, rerun_tests=False, allow_mock=True,
+                     staged_files=["docs/notes.md"])
+    assert not res.passed                       # outside scope before
+    added, errors = world_copy.add_scope(["docs/notes.md",
+                                          ".git/hooks/pre-commit"])
+    assert added == ["docs/notes.md"]
+    assert errors and "infrastructure" in errors[0]
+    log = (world_copy.run_dir / "scope-log.jsonl").read_text(encoding="utf-8")
+    assert "docs/notes.md" in log               # expansion is durable
+    res = gate_check(world_copy, rerun_tests=False, allow_mock=True,
+                     staged_files=["docs/notes.md"])
+    assert res.passed, res.errors               # explicit expansion works
+
+
+def test_scope_stripped_from_run_json_fails_closed(world_copy):
+    """run.json is not HMAC-protected; deleting the scope must not unbind
+    the run — a no-scope run authorizes nothing."""
+    meta = json.loads((world_copy.run_dir / "run.json").read_text(
+        encoding="utf-8"))
+    meta.pop("scope", None)
+    (world_copy.run_dir / "run.json").write_text(
+        json.dumps(meta), encoding="utf-8")
+    res = gate_check(world_copy, rerun_tests=False, allow_mock=True,
+                     staged_files=["anything.py"])
+    assert not res.passed
+    assert any("scope is mandatory" in e for e in res.errors)
+    assert any("out-of-scope" in e for e in res.errors)
+
+
+def test_scope_operator_unbounded_is_explicit_and_logged(tmp_path, capsys):
+    # combined with a scope: contradiction, rejected
+    with pytest.raises(ValueError, match="cannot be combined"):
+        BobRun.start(tmp_path / "w1", goal="g", key_path=tmp_path / "k.key",
+                     scope=["a.py"], operator_unbounded=True)
+    run = BobRun.start(tmp_path / "w2", goal="g",
+                       key_path=tmp_path / "k.key", operator_unbounded=True)
+    assert run.unbounded() and run.scope() == []
+    assert "OPERATOR-UNBOUNDED" in capsys.readouterr().err    # loud
+    log = (run.run_dir / "scope-log.jsonl").read_text(encoding="utf-8")
+    assert "operator_unbounded" in log                         # durable
+    # infrastructure still can never be scope-added, even unbounded
+    added, errors = run.add_scope([".git/hooks/pre-commit"])
+    assert not added and errors
+
+
+def test_scope_operator_unbounded_has_no_cli_flag():
+    """The unbounded escape is a Python-API parameter only: no CLI verb
+    exposes it, so an agent driving the CLI cannot reach it."""
+    from agent_ultra.adapters import cli
+    src = open(cli.__file__, encoding="utf-8").read()
+    assert "operator-unbounded" not in src
+    assert "operator_unbounded" not in src
+
+
+# --------------------------------------------------------------------------
+# abandon is explicit, operator-only, logged; escapes are agent-unreachable
+# --------------------------------------------------------------------------
+
+def test_abandon_is_operator_only_and_logged(tmp_path):
+    run = BobRun.start(tmp_path / "ws", goal="g",
+                       key_path=tmp_path / "k.key", scope=["a.py"])
+    with pytest.raises(ValueError, match="operator"):
+        BobRun.abandon(tmp_path / "ws")                 # agent path: refused
+    name = BobRun.abandon(tmp_path / "ws", operator=True, reason="stuck")
+    assert name == run.run_id
+    assert BobRun.active(tmp_path / "ws") is None       # released
+    log = (tmp_path / "ws" / ".agent-ultra" / "bob"
+           / "abandoned.jsonl").read_text(encoding="utf-8")
+    assert run.run_id in log and "stuck" in log
+    assert (run.run_dir / "abandoned.json").exists()
+    # a fresh run may start after the explicit abandon
+    r2 = BobRun.start(tmp_path / "ws", goal="next",
+                      key_path=tmp_path / "k.key", scope=["a.py"])
+    assert BobRun.active(tmp_path / "ws").run_id == r2.run_id
+
+
+def test_cli_abandon_requires_operator_flag(tmp_path, monkeypatch):
+    from agent_ultra.adapters import cli
+    BobRun.start(tmp_path / "ws", goal="g", key_path=tmp_path / "k.key",
+                 scope=["a.py"])
+    monkeypatch.setenv("AGENT_ULTRA_HOME", str(tmp_path / "home"))
+    assert cli.main(["bob", "abandon",
+                     "--workspace", str(tmp_path / "ws")]) == 1
+    assert BobRun.active(tmp_path / "ws") is not None   # still enforced
+    assert cli.main(["bob", "abandon", "--operator-abandon",
+                     "--workspace", str(tmp_path / "ws")]) == 0
+    assert BobRun.active(tmp_path / "ws") is None
+
+
+def test_broker_denies_operator_escape_flags():
+    """An agent-driven shell (broker-mediated) cannot auto-run the
+    operator escapes: they classify DANGEROUS."""
+    from agent_ultra.broker.broker import classify as _classify
+    for cmd in ("agent-ultra bob abandon --operator-abandon",
+                "agent-ultra bob run \"t\" --operator-force",
+                "python x.py --operator-unbounded"):
+        tier, why = _classify(cmd)
+        assert tier == "dangerous", (cmd, tier, why)
+        assert "operator-only" in why
+
+
+def test_cloned_fanout_is_rejected():
+    from agent_ultra.bob.pipeline import cloned_fanout_error
+    same = [{"status": "ok", "output_sha256": "aaa"} for _ in range(4)]
+    assert "IDENTICAL" in cloned_fanout_error("r1", same)
+    mixed = [{"status": "ok", "output_sha256": h} for h in ("a", "b", "a")]
+    assert cloned_fanout_error("r1", mixed) is None     # pair is legal
+    assert cloned_fanout_error("r1", same[:1]) is None  # single agent

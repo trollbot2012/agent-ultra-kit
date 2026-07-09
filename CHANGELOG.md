@@ -25,6 +25,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `agent-ultra bob hook-install` to regenerate the hooks.**
 
 ### Added
+- **bob run lifecycle + fan-out integrity hardening.** A run can no longer
+  be dropped quietly, and fan-out proof got stricter:
+  - *No silent orphaning.* `BobRun.start(force=True)` (CLI:
+    `bob run --operator-force`, renamed from `--force`) now leaves a
+    durable abandonment record instead of silently superseding the
+    unproven run. New `bob abandon --operator-abandon [--reason]` releases
+    an unproven run explicitly — refused without the flag — logging to
+    `.agent-ultra/bob/abandoned.jsonl` plus `abandoned.json` in the run
+    dir, and it announces loudly on stderr.
+  - *Operator escapes are agent-unreachable.* The command broker
+    classifies `--operator-abandon` / `--operator-force` /
+    `--operator-unbounded` as DANGEROUS, so a broker-mediated agent shell
+    cannot auto-run them.
+  - *Cloned fan-out rejected.* A step-6/7 ultracode run whose completed
+    agents all produced IDENTICAL output (per-agent `output_sha256` in the
+    run receipt) is one review wearing N hats — the gate now blocks it.
+    Demo mode (`--allow-mock`) is exempt: the offline mock answers every
+    agent identically by design, and mock evidence is already only
+    acceptable there.
+  - **Breaking:** `bob run --force` is now `bob run --operator-force`.
+
+- **bob run scope — a run is bound to what it declared.** Every bob run now
+  declares its target scope at start (`BobRun.start(..., scope=[...])`;
+  `run_bob` declares the generated test+impl files automatically) and the
+  gate rejects staged files outside it, so a run opened for module A cannot
+  smuggle in edits to module B. Scope is mandatory and fail-closed: a
+  no-scope start refuses, and a scope stripped from `run.json` afterwards
+  authorizes nothing. Expansion goes only through the validated, logged
+  mechanism (`agent-ultra bob scope-add`, recorded in `scope-log.jsonl`).
+  `.git/hooks` and `.agent-ultra` paths are rejected as scope entries
+  always — a run cannot declare authority over its own enforcement. The
+  only unbounded form is `operator_unbounded=True`, a Python-API parameter
+  deliberately absent from the CLI (an agent driving the CLI cannot reach
+  it), loudly announced and durably logged. **Breaking:** `BobRun.start`
+  now requires `scope=`; `run_bob` callers are unaffected.
+
 - **bob** (`agent_ultra.bob`) — the 10-step enforced build pipeline
   (SPEC → RED → GREEN → REFACTOR → CODE-QUALITY → SECURITY-FANOUT → WORKFLOW
   → ULTRA → QUIZ → COMMIT) composing ultracode fan-out, the adversarial

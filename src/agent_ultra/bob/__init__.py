@@ -19,7 +19,7 @@ from .receipts import (
 from .pipeline import (
     BobRun, BobProofError, GateResult,
     gate_check, run_pytest_step, assert_bob_done, load_or_create_key,
-    install_hooks,
+    install_hooks, scope_contains, scope_entry_is_infra,
 )
 from .runner import run_bob, BobOutcome
 
@@ -28,5 +28,6 @@ __all__ = [
     "build_step_receipt", "load_receipt", "validate_chain",
     "BobRun", "BobProofError", "GateResult",
     "gate_check", "run_pytest_step", "assert_bob_done", "load_or_create_key",
-    "install_hooks", "run_bob", "BobOutcome",
+    "install_hooks", "scope_contains", "scope_entry_is_infra",
+    "run_bob", "BobOutcome",
 ]

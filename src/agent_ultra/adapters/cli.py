@@ -298,7 +298,7 @@ def _bob_run(args) -> int:
         pool = _build_pool(args)
     outcome = run_bob(args.task, args.workspace, mock=args.mock, pool=pool,
                       interactive=False if args.no_quiz else None,
-                      force=args.force)
+                      force=args.operator_force)
     return 0 if outcome.passed else 1
 
 
@@ -349,6 +349,42 @@ def _bob_seal(args) -> int:
     print(f"NOT SEALED — run {run.run_id} has no recorded gate pass "
           "(run `agent-ultra bob gate --mark-pass` first)", file=sys.stderr)
     return 1
+
+
+def _bob_scope_add(args) -> int:
+    from ..bob import BobRun
+    run = BobRun.active(args.workspace)
+    if run is None or run.marker_orphaned():
+        print("no active bob run — nothing to expand", file=sys.stderr)
+        return 2
+    added, errors = run.add_scope(args.paths)
+    for e in errors:
+        print(f"SCOPE REJECTED — {e}", file=sys.stderr)
+    if added:
+        print(f"scope expanded (logged): +{added}")
+    print(f"scope now: {run.scope()}")
+    return 1 if errors else 0
+
+
+def _bob_abandon(args) -> int:
+    from ..bob import BobRun
+    if not args.operator_abandon:
+        print("ABANDON REFUSED — requires the explicit --operator-abandon "
+              "flag (operator only; an agent cannot abandon an unproven "
+              "run)", file=sys.stderr)
+        return 1
+    try:
+        name = BobRun.abandon(args.workspace, operator=True,
+                              reason=args.reason)
+    except ValueError as e:
+        print(f"ABANDON REFUSED — {e}", file=sys.stderr)
+        return 1
+    if name is None:
+        print("no active bob run — nothing to abandon")
+        return 0
+    print(f"run {name} abandoned (logged to .agent-ultra/bob/"
+          "abandoned.jsonl)")
+    return 0
 
 
 def _bob_hooks(args) -> int:
@@ -548,8 +584,9 @@ def main(argv=None) -> int:
         br.add_argument("--workspace", default=".")
         br.add_argument("--no-quiz", action="store_true",
                         help="record the quiz step as skipped (non-interactive)")
-        br.add_argument("--force", action="store_true",
-                        help="abandon an existing unproven active run and start fresh")
+        br.add_argument("--operator-force", action="store_true",
+                        help="OPERATOR ONLY: abandon an existing unproven "
+                             "active run (durably logged) and start fresh")
         br.add_argument("--mock", action="store_true",
                         help="offline demo on the bundled sample task (no key)")
         br.add_argument("--mode", default="single", choices=["single", "mixed"])
@@ -595,6 +632,27 @@ def main(argv=None) -> int:
         bs = bsub.add_parser("status", help="show which steps have receipts")
         bs.add_argument("--workspace", default=".")
         bs.set_defaults(func=_bob_status)
+
+        ba = bsub.add_parser("scope-add",
+                             help="expand the active run's declared scope — "
+                                  "the approved, validated, logged mechanism "
+                                  "(infrastructure paths always rejected)")
+        ba.add_argument("paths", nargs="+",
+                        help="files/dirs/globs to add to the run's scope")
+        ba.add_argument("--workspace", default=".")
+        ba.set_defaults(func=_bob_scope_add)
+
+        bab = bsub.add_parser("abandon",
+                              help="OPERATOR ONLY: release an unproven "
+                                   "ACTIVE run with a durable abandonment "
+                                   "record — the only sanctioned way to "
+                                   "drop a run without proving it")
+        bab.add_argument("--operator-abandon", action="store_true",
+                         help="required confirmation flag (operator only)")
+        bab.add_argument("--reason", default="",
+                         help="why the run is abandoned")
+        bab.add_argument("--workspace", default=".")
+        bab.set_defaults(func=_bob_abandon)
 
     gp = sub.add_parser("panel-gate",
                         help="block REPORT unless a valid panel execution "
