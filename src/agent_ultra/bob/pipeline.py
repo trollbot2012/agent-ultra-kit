@@ -39,11 +39,15 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .receipts import (
-    STEPS, GATED_STEPS, BobReceiptError,
+    STEPS, GATED_STEPS, SURGICAL_GATED_STEPS, BobReceiptError,
     build_step_receipt, load_receipt, validate_chain, utc_now,
+)
+from .surgical import (
+    surgical_ext_allowed, surgical_file_denied, staged_set_qualifies,
+    diff_budget_error,
 )
 
 # staged files never produced by the build itself
@@ -86,7 +90,13 @@ def safe_rel(workspace: Path, name: str) -> str:
     names pass through here before anything is written."""
     workspace = Path(workspace).resolve()
     cand = Path(name)
-    if cand.is_absolute() or cand.drive or cand.anchor:
+    # judge absoluteness under BOTH path flavors: on POSIX, "C:/Windows/x"
+    # has no drive under native Path semantics and would silently become a
+    # literal "C:" directory inside the workspace (Ubuntu CI caught this) —
+    # a model-authored Windows-absolute name must be rejected everywhere.
+    win = PureWindowsPath(str(name))
+    if (cand.is_absolute() or cand.drive or cand.anchor
+            or win.is_absolute() or win.drive or win.anchor):
         raise ValueError(f"{name!r} is absolute")
     target = (workspace / cand).resolve()
     try:
@@ -96,6 +106,49 @@ def safe_rel(workspace: Path, name: str) -> str:
     if not rel.parts:
         raise ValueError(f"{name!r} is the workspace root, not a file")
     return rel.as_posix()
+
+
+def _norm_scope_entry(s: str) -> str:
+    """Normalize a scope entry to a forward-slash, workspace-relative path
+    with no leading ./ (a trailing / marks a directory)."""
+    r = str(s).strip().replace("\\", "/")
+    while r.startswith("./"):
+        r = r[2:]
+    return r
+
+
+def scope_entry_is_infra(entry: str) -> bool:
+    """True when a scope entry names enforcement infrastructure — the git
+    hooks or bob's own receipt/marker machinery. Such paths are never a
+    legitimate run target: a run must not be able to declare authority over
+    the thing that enforces it."""
+    segs = _norm_scope_entry(entry).lower().rstrip("/").split("/")
+    if ".agent-ultra" in segs:
+        return True
+    if ".git" in segs:
+        i = segs.index(".git")
+        return i + 1 >= len(segs) or segs[i + 1] == "hooks"
+    return False
+
+
+def scope_contains(scope, target_rel: str) -> bool:
+    """True when *target_rel* (workspace-relative) falls inside *scope* —
+    an exact file, anything under a declared directory, or an fnmatch glob.
+    Case-folded with .lower() on purpose: os.path.normcase would flip / to
+    \\ on Windows and break the forward-slash prefix checks."""
+    t = _norm_scope_entry(target_rel).lower()
+    for raw in scope or []:
+        e = _norm_scope_entry(raw).lower()
+        if not e:
+            continue
+        ed = e.rstrip("/")
+        if t == ed:
+            return True
+        if t.startswith(ed + "/"):
+            return True
+        if fnmatch.fnmatch(t, e) or fnmatch.fnmatch(t, ed):
+            return True
+    return False
 
 
 def ultracode_receipt_fingerprint(home, run_id: str) -> str:
@@ -133,18 +186,86 @@ class BobRun:
     @classmethod
     def start(cls, workspace: str | Path, goal: str = "",
               key_path: str | Path | None = None,
-              force: bool = False) -> "BobRun":
+              force: bool = False,
+              scope: "list | None" = None,
+              operator_unbounded: bool = False,
+              mode: str = "full",
+              surgical_files: "list | None" = None) -> "BobRun":
         """Open a run. Refuses (ValueError) if another run is already ACTIVE
         and unproven — starting over would silently orphan it and release it
-        from enforcement. Pass ``force=True`` to abandon it deliberately."""
+        from enforcement. Pass ``force=True`` to abandon it deliberately.
+
+        ``scope`` — the files/dirs/globs this run is FOR — is MANDATORY: the
+        gate rejects staged files outside the declared scope, so a run
+        opened for module A cannot smuggle in edits to module B. A run with
+        no declared scope fails closed (start refuses; a scope stripped from
+        run.json later blocks every staged file at the gate). Expand a live
+        run's scope only through ``add_scope`` (validated + logged).
+
+        ``operator_unbounded=True`` is the explicit, operator-only escape:
+        no scope binding for this run. It is a Python-API parameter on
+        purpose — no CLI verb exposes it, so an agent driving the CLI cannot
+        reach it. It is loudly announced and durably logged, and it never
+        covers the git hooks or bob's own machinery."""
         workspace = Path(workspace)
-        marker = cls._root(workspace) / "ACTIVE"
-        if marker.is_file() and not force:
-            prev = marker.read_text(encoding="utf-8").strip()
+        if mode not in ("full", "surgical"):
+            raise ValueError(f"unknown bob mode: {mode!r}")
+        if mode == "surgical":
+            # the surgical lane is for INERT edits only — objective entry
+            # criteria validated up front; anything else is full-pipeline
+            # work. Its scope IS its declared files, exactly.
+            if operator_unbounded:
+                raise ValueError(
+                    "operator_unbounded is NEVER valid for surgical mode — "
+                    "a surgical run's scope is exactly its declared inert "
+                    "files")
+            if not surgical_files:
+                raise ValueError(
+                    "surgical_files is required for surgical mode — "
+                    "declare the files you intend to edit")
+            for f in surgical_files:
+                if surgical_file_denied(f):
+                    raise ValueError(
+                        f"surgical mode denied_path {f!r} — this file can "
+                        "execute in CI/build/install contexts; run the "
+                        "full pipeline")
+                if not surgical_ext_allowed(f):
+                    raise ValueError(
+                        f"surgical mode rejects code file {f!r} — only "
+                        "non-executable text types qualify; run the full "
+                        "pipeline")
+            scope = list(surgical_files)
+        scope = [_norm_scope_entry(s) for s in (scope or []) if str(s).strip()]
+        for s in scope:
+            if scope_entry_is_infra(s):
+                raise ValueError(
+                    f"scope {s!r} names enforcement infrastructure "
+                    "(.git/hooks or .agent-ultra) — never a run target")
+        if operator_unbounded and scope:
             raise ValueError(
-                f"a bob run ({prev}) is already active and unproven in this "
-                "workspace — finish it (`agent-ultra bob gate`) or pass "
-                "force=True to abandon it. Starting over would orphan it.")
+                "operator_unbounded cannot be combined with a declared "
+                "scope — declare the files OR the operator escape, not both")
+        if not scope and not operator_unbounded:
+            raise ValueError(
+                "a bob run must declare its target scope (the files/dirs "
+                "this run is for) — no-scope runs fail closed; expand later "
+                "with add_scope if the work legitimately grows")
+        marker = cls._root(workspace) / "ACTIVE"
+        if marker.is_file():
+            if not force:
+                prev = marker.read_text(encoding="utf-8").strip()
+                raise ValueError(
+                    f"a bob run ({prev}) is already active and unproven in "
+                    "this workspace — finish it (`agent-ultra bob gate`) or "
+                    "have the operator abandon it explicitly (`agent-ultra "
+                    "bob abandon --operator-abandon`, logged). A run cannot "
+                    "be dropped by starting another.")
+            # force=True is the OPERATOR escape (CLI: --operator-force; the
+            # command broker classifies operator flags as dangerous, so an
+            # agent-driven shell cannot auto-run them). Never silent: the
+            # abandonment is durably logged.
+            cls.abandon(workspace, operator=True,
+                        reason="superseded via start(force=True)")
         stamp = utc_stamp()
         run_dir = cls._root(workspace) / "runs" / stamp
         n = 0
@@ -152,10 +273,33 @@ class BobRun:
             n += 1
             run_dir = cls._root(workspace) / "runs" / f"{stamp}-{n}"
         run_dir.mkdir(parents=True)
-        (run_dir / "run.json").write_text(json.dumps({
+        meta = {
             "run_id": run_dir.name, "goal": goal, "started_utc": utc_now(),
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
+            "scope": scope, "mode": mode,
+        }
+        if mode == "surgical":
+            meta["surgical_files"] = [_norm_scope_entry(f)
+                                      for f in surgical_files]
+        if operator_unbounded:
+            meta["operator_unbounded"] = True
+        (run_dir / "run.json").write_text(json.dumps(
+            meta, indent=2, ensure_ascii=False), encoding="utf-8")
         marker.write_text(run_dir.name, encoding="utf-8")
+        if operator_unbounded:
+            try:
+                with open(run_dir / "scope-log.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "ts": utc_now(), "operator_unbounded": True,
+                        "note": "UNBOUNDED run opened via the operator "
+                                "escape — no scope binding for this run",
+                    }) + "\n")
+            except OSError:
+                pass
+            print("!!! bob: OPERATOR-UNBOUNDED run — no scope binding; the "
+                  "gate will not reject out-of-scope staged files for this "
+                  "run (hooks/.agent-ultra stay off limits). Logged.",
+                  file=sys.stderr)
         return cls(workspace=workspace, run_dir=run_dir,
                    key=load_or_create_key(key_path))
 
@@ -181,17 +325,121 @@ class BobRun:
     def marker_orphaned(self) -> bool:
         return not self.run_dir.is_dir()
 
+    @classmethod
+    def abandon(cls, workspace: str | Path, *, operator: bool = False,
+                reason: str = "") -> "str | None":
+        """OPERATOR-ONLY: release the ACTIVE marker of an unproven run,
+        leaving a durable abandonment record. This is the only sanctioned
+        way to drop a run without proving it — start() refuses to orphan,
+        and the command broker classifies the CLI's operator flags as
+        dangerous so an agent-driven shell cannot auto-run them. Returns
+        the abandoned run id, or None when no run is active. Works on an
+        orphaned marker too (releases it, still on the record)."""
+        if not operator:
+            raise ValueError(
+                "abandon requires the explicit operator flag — an agent "
+                "cannot abandon an unproven run")
+        workspace = Path(workspace)
+        marker = cls._root(workspace) / "ACTIVE"
+        if not marker.is_file():
+            return None
+        name = marker.read_text(encoding="utf-8").strip()
+        rec = {"ts": utc_now(), "run_id": name, "reason": reason,
+               "operator_abandon": True}
+        try:
+            with open(cls._root(workspace) / "abandoned.jsonl", "a",
+                      encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except OSError:
+            pass
+        run_dir = cls._root(workspace) / "runs" / name
+        if run_dir.is_dir():
+            try:
+                (run_dir / "abandoned.json").write_text(
+                    json.dumps(rec, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+        marker.unlink()
+        print(f"!!! bob: run {name} ABANDONED by operator (unproven; "
+              "logged to .agent-ultra/bob/abandoned.jsonl)",
+              file=sys.stderr)
+        return name
+
     @property
     def run_id(self) -> str:
         return self.run_dir.name
 
-    def goal(self) -> str:
+    def _meta(self) -> dict:
         try:
             meta = json.loads((self.run_dir / "run.json").read_text(
                 encoding="utf-8"))
-            return str(meta.get("goal", ""))
+            return meta if isinstance(meta, dict) else {}
         except (OSError, ValueError):
-            return ""
+            return {}
+
+    def goal(self) -> str:
+        return str(self._meta().get("goal", ""))
+
+    def scope(self) -> list:
+        """The run's declared target scope. Scope is mandatory: an empty
+        scope authorizes NOTHING at the gate (fail closed) unless the run
+        was opened with the explicit operator_unbounded escape."""
+        return list(self._meta().get("scope") or [])
+
+    def unbounded(self) -> bool:
+        """True only for a run opened via the explicit, operator-only
+        operator_unbounded escape. run.json is plaintext, so this flag is
+        tamper-EVIDENT (loudly logged at start), not tamper-proof — same
+        trust ceiling as the rest of the run metadata."""
+        return bool(self._meta().get("operator_unbounded"))
+
+    def mode(self) -> str:
+        """Run mode from run.json; absent field = full (backward compat).
+        run.json is plaintext, so the mode is a REQUEST the gate verifies
+        (see gate_check's C1 dispatch), never a trusted assertion."""
+        return str(self._meta().get("mode") or "full")
+
+    def surgical_files(self) -> list:
+        return list(self._meta().get("surgical_files") or [])
+
+    def add_scope(self, paths) -> "tuple[list, list]":
+        """Expand the run's scope — the approved, validated, logged
+        mechanism. Rejects infrastructure paths always. Appends to run.json
+        and records each expansion in scope-log.jsonl. Returns
+        (added, errors)."""
+        meta = self._meta()
+        cur = list(meta.get("scope") or [])
+        surgical = str(meta.get("mode") or "full") == "surgical"
+        added, errors = [], []
+        for raw in paths or []:
+            e = _norm_scope_entry(raw)
+            if not e:
+                continue
+            if scope_entry_is_infra(e):
+                errors.append(f"{e}: enforcement infrastructure — never a "
+                              "run target")
+                continue
+            if surgical and (surgical_file_denied(e)
+                             or not surgical_ext_allowed(e)):
+                errors.append(f"{e}: not an inert/allowed type — a surgical "
+                              "run cannot expand into risky paths (use the "
+                              "full pipeline)")
+                continue
+            if e not in cur:
+                cur.append(e)
+                added.append(e)
+        if added:
+            meta["scope"] = cur
+            (self.run_dir / "run.json").write_text(json.dumps(
+                meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                with open(self.run_dir / "scope-log.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": utc_now(),
+                                         "added": added}) + "\n")
+            except OSError:
+                pass
+        return added, errors
 
     def receipt_path(self, step: str) -> Path:
         if step not in STEPS:
@@ -395,6 +643,21 @@ def _as_int(value) -> int:
         return 0
 
 
+def cloned_fanout_error(run_id: str, done_agents) -> "str | None":
+    """A fan-out of N agents that all produced the SAME output is one
+    review wearing N hats — the per-agent output_sha256 in the ultracode
+    receipt exposes the clone. Only the all-identical case is flagged
+    (>=2 agents, one distinct digest): a single coincidental pair of short
+    verdicts stays legal, a copy-pasted sweep does not."""
+    digests = {str(a.get("output_sha256") or "") for a in done_agents
+               if isinstance(a, dict) and a.get("output_sha256")}
+    if len(done_agents) >= 2 and len(digests) == 1:
+        return (f"ultracode run {run_id!r}: all {len(done_agents)} agents "
+                "produced IDENTICAL output — a cloned fan-out is one "
+                "review, not an independent sweep")
+    return None
+
+
 def check_ultracode_evidence(evidence: dict, *, allow_mock: bool,
                              receipt_mock: bool,
                              expect_workflow: str = "") -> list[str]:
@@ -457,6 +720,13 @@ def check_ultracode_evidence(evidence: dict, *, allow_mock: bool,
     if not done:
         errors.append(f"ultracode run {run_id!r} completed 0 agents — "
                       "an empty fan-out proves nothing")
+    # the offline mock route answers every agent identically by design, so
+    # the cloned-fanout check would always trip in demo mode; mock receipts
+    # are only acceptable under --allow-mock anyway, which is the boundary
+    # that already scopes what a demo may prove
+    if not (receipt_mock and allow_mock):
+        if (err := cloned_fanout_error(run_id, done)):
+            errors.append(err)
     if _as_int(rec.get("model_calls")) + _as_int(rec.get("cached_hits")) <= 0:
         errors.append(f"ultracode run {run_id!r} made 0 model calls")
     if receipt_mock and not allow_mock:
@@ -534,6 +804,22 @@ def gate_check(run: BobRun, *, rerun_tests: bool = True,
     receipts themselves must still hold).
     """
     try:
+        # ---- mode dispatch (C1: mode-downgrade defense) --------------------
+        # run.json's mode field is a REQUEST the gate verifies, never a
+        # trusted assertion. The commit is routed to the surgical gate ONLY
+        # when the run asks for it AND the actual staged set independently
+        # qualifies (all inert, none denied, all declared). Flipping a
+        # run's mode to "surgical" with code staged therefore routes it to
+        # the FULL gate — which demands the full receipt chain and blocks.
+        if run.mode() == "surgical" and not run.marker_orphaned():
+            routed = staged_files
+            if routed is None and _inside_work_tree(Path(run.workspace)):
+                routed = _staged_files(Path(run.workspace))
+            if routed is not None and staged_set_qualifies(
+                    routed, run.surgical_files()):
+                return surgical_gate_check(run, allow_mock=allow_mock,
+                                           staged_files=routed)
+            # falls through: the staged set does not qualify -> FULL gate
         return _gate_check(run, rerun_tests=rerun_tests, allow_mock=allow_mock,
                            staged_files=staged_files,
                            allow_uncovered=allow_uncovered)
@@ -541,6 +827,137 @@ def gate_check(run: BobRun, *, rerun_tests: bool = True,
         return GateResult(passed=False,
                           errors=[f"gate error (fail-closed): "
                                   f"{type(e).__name__}: {e}"])
+
+
+def surgical_gate_check(run: BobRun, *, allow_mock: bool = False,
+                        staged_files=None) -> GateResult:
+    """The surgical lane's gate — fail-closed throughout, and NARROWER than
+    full mode on every axis it covers: declared-file allowlist, inert types
+    only, a denylist, and a small diff budget. It can never loosen the full
+    gate: gate_check routes here only when the staged set independently
+    qualifies; everything else gets the full 10-step demands."""
+    try:
+        return _surgical_gate_check(run, allow_mock=allow_mock,
+                                    staged_files=staged_files)
+    except Exception as e:
+        return GateResult(passed=False,
+                          errors=[f"surgical gate error (fail-closed): "
+                                  f"{type(e).__name__}: {e}"])
+
+
+def _surgical_gate_check(run: BobRun, *, allow_mock: bool,
+                         staged_files) -> GateResult:
+    errors: list[str] = []
+    checked: dict = {}
+
+    if run.marker_orphaned():
+        return GateResult(passed=False, errors=[
+            f"run {run.run_id}: ACTIVE marker names a run directory that no "
+            "longer exists — the run was deleted while unproven (fail closed)"])
+
+    declared = run.surgical_files()
+    if not declared:
+        errors.append("surgical: no surgical_files declared in run.json — "
+                      "fail closed")
+    for f in declared:
+        if surgical_file_denied(f) or not surgical_ext_allowed(f):
+            errors.append(f"surgical: declared file {f} is not an inert/"
+                          "allowed type — use the full pipeline")
+
+    # chain spine: same signed/hash-chained demands as full mode
+    chain = run.chain()
+    errors.extend(validate_chain(chain, run.key or None))
+    checked["chain"] = f"{len(chain)} receipt(s), hash-chained + signed"
+
+    have = {r.get("step") for r in chain}
+    for step in SURGICAL_GATED_STEPS:
+        if step not in have:
+            errors.append(f"{step}: receipt missing — the step never ran "
+                          "(or its receipt was deleted)")
+
+    def _ev(rec) -> dict:
+        ev = rec.get("evidence") if isinstance(rec, dict) else None
+        return ev if isinstance(ev, dict) else {}
+
+    # ---- review: cross-checked against the ultracode run it names --------
+    review = run.load("step_surgical_review")
+    if review is not None:
+        ev = _ev(review)
+        rerrs = check_ultracode_evidence(
+            ev, allow_mock=allow_mock, receipt_mock=bool(review.get("mock")),
+            expect_workflow="bob-surgical-review")
+        errors.extend(f"step_surgical_review: {e}" for e in rerrs)
+        checked["step_surgical_review"] = ("ultracode run verified"
+                                           if not rerrs else "INVALID")
+
+    # ---- quiz: passed requires the captured operator response ------------
+    quiz = run.load("step_surgical_quiz")
+    if quiz is not None:
+        ev = _ev(quiz)
+        if (e := _mock_flag_error(quiz, "step_surgical_quiz", allow_mock)):
+            errors.append(e)
+        outcome = ev.get("outcome")
+        if outcome not in ("passed", "skipped"):
+            errors.append(f"step_surgical_quiz: outcome {outcome!r} is not "
+                          "passed/skipped")
+        if not ev.get("questions"):
+            errors.append("step_surgical_quiz: no comprehension questions "
+                          "recorded")
+        if outcome == "passed" and not str(
+                ev.get("operator_response", "") or "").strip():
+            errors.append("step_surgical_quiz: outcome 'passed' without a "
+                          "captured operator response — a quiz nobody "
+                          "answered (self-graded quizzes do not count)")
+        checked["step_surgical_quiz"] = f"outcome={outcome}"
+
+    # ---- staleness: covered files must match disk -------------------------
+    coverage: dict = {}
+    for rec in chain:
+        coverage.update(rec.get("files") or {})
+    for rel, expected in sorted(coverage.items()):
+        f = Path(run.workspace) / rel
+        if not f.is_file():
+            errors.append(f"stale: {rel} covered by a receipt but no longer "
+                          "exists")
+        elif sha256_file(f) != expected:
+            errors.append(f"stale: {rel} changed after its last covering "
+                          "receipt — re-run the review")
+    checked["staleness"] = f"{len(coverage)} file(s) covered"
+
+    # ---- staged set: declared + inert only, fail-closed --------------------
+    if staged_files is None:
+        if _inside_work_tree(Path(run.workspace)):
+            staged_files = _staged_files(Path(run.workspace))
+            if staged_files is None:
+                errors.append("surgical: could not read the staged list "
+                              "(git error) — fail closed")
+                staged_files = []
+        else:
+            staged_files = []
+    declared_norm = {os.path.normpath(str(d)).replace("\\", "/").lower()
+                     for d in declared}
+    for rel in staged_files:
+        norm = os.path.normpath(str(rel)).replace("\\", "/").lower()
+        if norm.startswith(".agent-ultra/"):
+            continue                     # run machinery rides along
+        if surgical_file_denied(rel):
+            errors.append(f"surgical: staged denied_path {rel} — this file "
+                          "executes; use the full pipeline")
+        elif not surgical_ext_allowed(rel):
+            errors.append(f"surgical: staged {rel} is not an inert type — "
+                          "the surgical lane is docs/config only")
+        elif norm not in declared_norm:
+            errors.append(f"surgical: staged {rel} was not declared in "
+                          "surgical_files")
+
+    # ---- diff budget: small edits only, fail-closed -------------------------
+    if _inside_work_tree(Path(run.workspace)):
+        if (berr := diff_budget_error(Path(run.workspace))):
+            errors.append(berr)
+        checked["diff_budget"] = "within budget" if not any(
+            "budget" in e or "BINARY" in e for e in errors) else "EXCEEDED"
+
+    return GateResult(passed=not errors, errors=errors, checked=checked)
 
 
 def _mock_flag_error(rec: dict, step: str, allow_mock: bool) -> "str | None":
@@ -717,6 +1134,31 @@ def _gate_check(run: BobRun, *, rerun_tests: bool, allow_mock: bool,
             continue
         errors.append(f"uncovered: staged file {rel} appears in no receipt — "
                       "it was never tested or fanned out for scrutiny")
+
+    # ---- staged files must be WITHIN the run's declared scope ------------------
+    # A run opened for module A must not authorize commits touching module B.
+    # Scope is mandatory: no scope + not the operator escape = every staged
+    # file blocks (fail closed) and the missing declaration is itself an
+    # error. Bob's own machinery (.agent-ultra receipts) is always exempt.
+    scope = run.scope()
+    if run.unbounded():
+        checked["scope"] = "OPERATOR-UNBOUNDED (no scope binding — logged)"
+    else:
+        if not scope:
+            errors.append(
+                "scope: run declares no target scope — scope is mandatory "
+                "and a no-scope run authorizes nothing (fail closed)")
+        for rel in staged_files:
+            if rel.startswith(".agent-ultra/") or rel == ".gitignore":
+                continue
+            if scope and scope_contains(scope, rel):
+                continue
+            errors.append(
+                f"out-of-scope: staged file {rel} is outside the run's "
+                "declared scope — if this edit is really part of the run, "
+                "expand the scope explicitly (`agent-ultra bob scope-add`)")
+        checked["scope"] = (f"{len(scope)} declared entr"
+                            + ("y" if len(scope) == 1 else "ies"))
 
     return GateResult(passed=not errors, errors=errors, checked=checked)
 

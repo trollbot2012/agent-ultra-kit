@@ -27,7 +27,8 @@ from .pipeline import (
     sha256_file, safe_rel, ultracode_receipt_fingerprint,
 )
 from . import sample
-from .workflows import SECURITY_WORKFLOW, REVIEW_WORKFLOW
+from .workflows import (SECURITY_WORKFLOW, REVIEW_WORKFLOW,
+                        SURGICAL_REVIEW_WORKFLOW)
 
 
 @dataclass
@@ -131,8 +132,38 @@ def run_bob(task: str, workspace: str | Path, *, mock: bool = False,
     if interactive is None:
         interactive = (not mock) and sys.stdin.isatty()
 
+    # ---- content generation happens BEFORE the run opens, because the run
+    # must declare its target scope at start (the files this run is FOR).
+    # The gate then rejects any staged file outside that scope, so a run
+    # opened for one module cannot smuggle in edits to another.
+    spec = sample.SAMPLE_SPEC if mock else _gen_spec(pool, task)
+    if not spec:
+        _say(out, "cannot start: no spec produced")
+        return BobOutcome(run_id="", passed=False, blocked_at="step01_spec")
+    if mock:
+        test_file, tests, impl_file, stub = (sample.TEST_FILE,
+                                             sample.SAMPLE_TESTS,
+                                             sample.IMPL_FILE,
+                                             sample.SAMPLE_STUB)
+    else:
+        gen = _gen_files(pool, task, spec)
+        if gen is None:
+            _say(out, "cannot start: model produced no usable tests")
+            return BobOutcome(run_id="", passed=False, blocked_at="step02_red")
+        test_file, tests, impl_file, stub = gen
+    # model-authored file names are untrusted: they must land INSIDE the
+    # workspace (no absolute paths, no `..` traversal). This mirrors the rest
+    # of the kit's "model output is untrusted input" stance.
     try:
-        run = BobRun.start(workspace, goal=task, key_path=key_path, force=force)
+        test_file = safe_rel(workspace, test_file)
+        impl_file = safe_rel(workspace, impl_file)
+    except ValueError as e:
+        _say(out, f"cannot start: unsafe model-authored path: {e}")
+        return BobOutcome(run_id="", passed=False, blocked_at="step02_red")
+
+    try:
+        run = BobRun.start(workspace, goal=task, key_path=key_path,
+                           force=force, scope=[test_file, impl_file])
     except ValueError as e:
         _say(out, f"cannot start: {e}")
         return BobOutcome(run_id="", passed=False, blocked_at="start")
@@ -153,32 +184,11 @@ def run_bob(task: str, workspace: str | Path, *, mock: bool = False,
               + ("  [mock: sample task, no key]" if mock else ""))
 
     # ---- 1. SPEC -----------------------------------------------------------
-    spec = sample.SAMPLE_SPEC if mock else _gen_spec(pool, task)
-    if not spec:
-        return blocked("step01_spec", "no spec produced")
     run.write("step01_spec", {"goal": task, "spec": spec}, writer="agent",
               mock=mock)
     record("step01_spec", spec[:70] + ("..." if len(spec) > 70 else ""))
 
     # ---- 2. RED -------------------------------------------------------------
-    if mock:
-        test_file, tests, impl_file, stub = (sample.TEST_FILE,
-                                             sample.SAMPLE_TESTS,
-                                             sample.IMPL_FILE,
-                                             sample.SAMPLE_STUB)
-    else:
-        gen = _gen_files(pool, task, spec)
-        if gen is None:
-            return blocked("step02_red", "model produced no usable tests")
-        test_file, tests, impl_file, stub = gen
-    # model-authored file names are untrusted: they must land INSIDE the
-    # workspace (no absolute paths, no `..` traversal). This mirrors the rest
-    # of the kit's "model output is untrusted input" stance.
-    try:
-        test_file = safe_rel(workspace, test_file)
-        impl_file = safe_rel(workspace, impl_file)
-    except ValueError as e:
-        return blocked("step02_red", f"unsafe model-authored path: {e}")
     for rel, content in ((test_file, tests), (impl_file, stub)):
         p = workspace / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -347,3 +357,118 @@ def run_bob(task: str, workspace: str | Path, *, mock: bool = False,
                   "seals it once your commit lands (`bob hook-install`).")
     return BobOutcome(run_id=run.run_id, passed=True, gate=gate, steps=steps,
                       report=report_doc)
+
+
+# -- the surgical lane ---------------------------------------------------------
+
+def run_surgical(task: str, workspace: str | Path, files, *,
+                 mock: bool = False, pool=None, key_path=None,
+                 ultracode_home=None, interactive: "bool | None" = None,
+                 seal_on_pass: bool = True, out=None) -> BobOutcome:
+    """The lightweight lane for INERT doc/config edits: review fan-out +
+    operator quiz + gate. Edit the files FIRST, then run this — the review
+    examines and pins the current content, and any later edit trips the
+    staleness check.
+
+    Entry criteria are objective and validated at start (inert types only,
+    denylist, no infrastructure); anything that does not qualify raises and
+    the answer is the FULL pipeline (`run_bob`). The gate additionally
+    re-verifies the staged set at commit time, so the surgical lane can
+    never launder code changes — it narrows Bob, it never replaces it."""
+    from ..routes.pool import RoutePool
+    workspace = Path(workspace)
+    if mock:
+        from ..ultracode import demo_pool
+        pool = demo_pool()
+    elif pool is None:
+        raise ValueError("a real run needs a configured RoutePool; "
+                         "pass pool= or use mock=True")
+    if interactive is None:
+        interactive = (not mock) and sys.stdin.isatty()
+
+    try:
+        run = BobRun.start(workspace, goal=task, key_path=key_path,
+                           mode="surgical", surgical_files=list(files))
+    except ValueError as e:
+        _say(out, f"cannot start: {e}")
+        return BobOutcome(run_id="", passed=False, blocked_at="start")
+    steps: list = []
+
+    def record(step, summary):
+        steps.append((step, summary))
+        _say(out, f"  [{step}] {summary}")
+
+    def blocked(step, why) -> BobOutcome:
+        _say(out, f"\nBLOCKED at {step}: {why}")
+        _say(out, f"run {run.run_id} stays ACTIVE — finish or redo the "
+                  "step, then `agent-ultra bob gate`.")
+        return BobOutcome(run_id=run.run_id, passed=False, blocked_at=step,
+                          steps=steps)
+
+    _say(out, f"bob surgical run {run.run_id} — {task}"
+              + ("  [mock: no key]" if mock else ""))
+    _say(out, f"  files: {list(files)}")
+
+    # ---- review: real ultracode fan-out over the current content ----------
+    from ..ultracode import UltracodeEngine
+    eng = UltracodeEngine(pool, home=ultracode_home)
+    excerpt = _excerpt(workspace, list(files))
+    rep = eng.run_script(SURGICAL_REVIEW_WORKFLOW,
+                         args={"goal": task, "files": list(files),
+                               "target_excerpt": excerpt})
+    if rep.final_state != "COMPLETE":
+        return blocked("step_surgical_review",
+                       f"review fan-out ended {rep.final_state}")
+    result = rep.result or {}
+    fp = ultracode_receipt_fingerprint(eng.home, rep.run_id)
+    run.write("step_surgical_review",
+              {"ultracode": {"run_id": rep.run_id, "home": str(eng.home),
+                             "workflow_name": "bob-surgical-review",
+                             "receipt_file_sha256": fp},
+               "lenses": result.get("lenses", []),
+               "reviews": result.get("reviews", {})},
+              writer="engine", files=list(files), mock=mock)
+    record("step_surgical_review",
+           f"{rep.agents_run} agents over {len(result.get('lenses', []))} lenses")
+
+    # ---- quiz: operator answer or the honest 'skipped' --------------------
+    questions = [
+        f"What exactly changed in {list(files)}, in your own words?",
+        "Could this edit alter any executable behavior? Why not?",
+        "What would make you revert it?",
+    ]
+    operator_response = ""
+    outcome = "skipped"
+    if interactive:
+        _say(out, "\nquiz — answer to claim 'passed' (empty answer skips):")
+        for q in questions:
+            _say(out, f"  Q: {q}")
+        try:
+            operator_response = input("  A: ").strip()
+        except (EOFError, OSError):
+            operator_response = ""
+        outcome = "passed" if operator_response else "skipped"
+    run.write("step_surgical_quiz",
+              {"questions": questions, "outcome": outcome,
+               "operator_response": operator_response},
+              writer="agent" if outcome == "passed" else "engine", mock=mock)
+    record("step_surgical_quiz", f"outcome={outcome}")
+
+    # ---- gate ---------------------------------------------------------------
+    gate = gate_check(run, allow_mock=mock, staged_files=[])
+    if not gate.passed:
+        _say(out, "\ngate BLOCKED:")
+        for e in gate.errors:
+            _say(out, f"  ! {e}")
+        return BobOutcome(run_id=run.run_id, passed=False,
+                          blocked_at="step_surgical_gate", gate=gate,
+                          steps=steps)
+    if seal_on_pass:
+        run.complete(gate.to_dict())
+    else:
+        run.mark_pass(gate.to_dict())
+    _say(out, f"\ngate PASSED — surgical chain validates "
+              f"({len(run.chain())} receipts).")
+    _say(out, "safe to commit the declared files: git add + git commit "
+              "(the pre-commit gate re-verifies the staged set).")
+    return BobOutcome(run_id=run.run_id, passed=True, gate=gate, steps=steps)

@@ -83,6 +83,45 @@ artifact, unverifiable chain) is a failure, not a warning. On block, the
 errors name exactly which step to redo. Staged files that appear in no
 receipt also block (`*.md`, `.agent-ultra/*`, and `.gitignore` are exempt).
 
+### Run scope: a run is FOR something
+
+Every run declares its target scope at start — the files/dirs/globs the run
+is for. `run_bob` declares the generated test + implementation files
+automatically; from Python pass `scope=[...]` to `BobRun.start`. The gate
+then rejects any staged file **outside** the declared scope, so a run opened
+for module A cannot smuggle in edits to module B:
+
+```
+out-of-scope: staged file other/thing.py is outside the run's declared scope
+```
+
+Rules:
+
+- **Scope is mandatory.** `BobRun.start` refuses a run with no scope, and a
+  scope stripped from `run.json` after the fact unbinds nothing — a no-scope
+  run authorizes NO staged files (fail closed).
+- **Expansion is explicit, validated, and logged.** If the work legitimately
+  grows, `agent-ultra bob scope-add <paths...>` appends to the scope and
+  records the expansion in `scope-log.jsonl`. Nothing else widens a run.
+- **Infrastructure is never in scope.** `.git/hooks` and `.agent-ultra`
+  paths are rejected at start and at scope-add, always — a run cannot
+  declare authority over the machinery that enforces it.
+- **A run cannot be dropped by starting another.** `start` refuses while
+  an unproven run is ACTIVE, and a marker naming a deleted run directory is
+  a tampering sentinel (the gate fails closed), not "no run". The only
+  sanctioned drop is `agent-ultra bob abandon --operator-abandon
+  [--reason]` — durably recorded in `.agent-ultra/bob/abandoned.jsonl`.
+  The command broker classifies all `--operator-*` escape flags as
+  DANGEROUS, so a broker-mediated agent shell cannot auto-run them.
+- **A cloned fan-out is one review.** If every completed agent of a
+  step-6/7 ultracode run produced identical output, the gate blocks — the
+  per-agent `output_sha256` in the run receipt exposes the clone.
+- **The operator escape is not a CLI flag.** `BobRun.start(...,
+  operator_unbounded=True)` opens a run with no scope binding; it is a
+  Python-API parameter on purpose (no CLI verb exposes it, so an agent
+  driving the CLI cannot reach it), it is announced loudly on stderr, and
+  it is durably recorded in `scope-log.jsonl`.
+
 ### Commit lifecycle: mark at pre-commit, seal at post-commit
 
 Sealing inside pre-commit is a deadlock: the pass would release ACTIVE
@@ -126,6 +165,48 @@ coverage check — that lives in the `agent-ultra bob gate` pre-commit path,
 which reads git's staged list. Install both: `assert_bob_done` guards
 completion claims, the pre-commit hook guards the commit itself and catches
 any staged file that no receipt covers.
+
+## The surgical lane (inert edits only)
+
+Typo-class doc/config edits do not need RED/GREEN and a five-agent sweep.
+The surgical lane is the sanctioned lightweight tier — and it NARROWS Bob,
+it never replaces it:
+
+```bash
+# edit the files first, then:
+agent-ultra bob surgical "fix readme wording" --files README.md
+agent-ultra bob surgical "fix readme wording" --files README.md --mock   # offline demo
+```
+
+The lane runs a real two-lens review fan-out (accuracy + safety, ultracode-
+backed and fingerprint-pinned exactly like steps 6/7), an operator quiz
+(`passed` requires your captured answer; an unanswered quiz is honestly
+`skipped`), and its own gate.
+
+Entry criteria are objective and validated at start — anything else raises
+and the answer is the full pipeline:
+
+- **Inert types only.** Prose (`.md`/`.rst`/`.txt`/...) and known-inert
+  dotfiles auto-qualify. Structured config (yaml/json/toml/ini/cfg) is
+  dual-use: it needs the operator's explicit
+  `AGENT_ULTRA_SURGICAL_ALLOW_CONFIG=1` AND must clear the denylist.
+- **The denylist is executable-by-context files** — CI workflows, git-hook
+  managers, task runners, package manifests, tool configs (matched by name,
+  path, and shape) — regardless of extension. A doc ABOUT Dockerfiles is a
+  doc; a `Dockerfile` is not.
+- **Declared files are the exact scope.** The gate rejects any staged file
+  that was not declared, is not inert, or is denied; `scope-add` on a
+  surgical run refuses risky paths.
+- **A small diff budget** (100 lines / 256 KiB, binary edits rejected),
+  fail-closed on any git error.
+
+**Mode downgrade cannot launder code (C1).** `run.json`'s mode field is a
+REQUEST the gate verifies, never a trusted assertion: `bob gate` routes to
+the surgical gate ONLY when the actual staged set independently qualifies
+(all inert, none denied, all declared). Flip a run's mode to "surgical"
+with code staged and you get the FULL gate — which demands the full receipt
+chain that run never produced. A full-mode run never auto-downgrades
+either, even when only inert files are staged: surgical is opt-in at start.
 
 ## Trust boundary (read this)
 
