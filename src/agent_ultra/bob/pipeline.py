@@ -39,7 +39,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .receipts import (
     STEPS, GATED_STEPS, SURGICAL_GATED_STEPS, BobReceiptError,
@@ -90,7 +90,13 @@ def safe_rel(workspace: Path, name: str) -> str:
     names pass through here before anything is written."""
     workspace = Path(workspace).resolve()
     cand = Path(name)
-    if cand.is_absolute() or cand.drive or cand.anchor:
+    # judge absoluteness under BOTH path flavors: on POSIX, "C:/Windows/x"
+    # has no drive under native Path semantics and would silently become a
+    # literal "C:" directory inside the workspace (Ubuntu CI caught this) —
+    # a model-authored Windows-absolute name must be rejected everywhere.
+    win = PureWindowsPath(str(name))
+    if (cand.is_absolute() or cand.drive or cand.anchor
+            or win.is_absolute() or win.drive or win.anchor):
         raise ValueError(f"{name!r} is absolute")
     target = (workspace / cand).resolve()
     try:
